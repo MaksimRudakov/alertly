@@ -1,0 +1,34 @@
+{
+  "version": "4",
+  "status": "firing",
+  "receiver": "alertly",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {"alertname": "PodCrashLoop", "severity": "warning", "pod": "api-1"},
+      "annotations": {"summary": "Pod api-1 is crash looping"},
+      "startsAt": "2026-04-21T10:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://prometheus.example.com/graph?g0=api-1",
+      "fingerprint": "fp-pod-1"
+    },
+    {
+      "status": "firing",
+      "labels": {"alertname": "PodCrashLoop", "severity": "warning", "pod": "api-2"},
+      "annotations": {"summary": "Pod api-2 is crash looping"},
+      "startsAt": "2026-04-21T10:01:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://prometheus.example.com/graph?g0=api-2",
+      "fingerprint": "fp-pod-2"
+    },
+    {
+      "status": "firing",
+      "labels": {"alertname": "PodCrashLoop", "pod": "api-3"},
+      "annotations": {},
+      "startsAt": "2026-04-21T10:02:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://prometheus.example.com/graph?g0=api-3",
+      "fingerprint": "fp-pod-3"
+    }
+  ]
+}

@@ -1,0 +1,141 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/MaksimRudakov/alertly/internal/metrics"
+	"github.com/MaksimRudakov/alertly/internal/notification"
+	"github.com/MaksimRudakov/alertly/internal/source"
+	tmpl "github.com/MaksimRudakov/alertly/internal/template"
+	"github.com/MaksimRudakov/alertly/internal/telegram"
+)
+
+type webhookDeps struct {
+	source       source.Source
+	renderer     tmpl.Renderer
+	tg           telegram.Client
+	readiness    ReadinessTracker
+	maxBodyBytes int64
+	templateName string
+}
+
+func webhookHandler(d webhookDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		logger := loggerFrom(ctx).With("source", d.source.Name())
+
+		chatsRaw := r.PathValue("chats")
+		targets, err := parseChatTargets(chatsRaw)
+		if err != nil {
+			logger.Warn("invalid chat list", "raw", chatsRaw, "err", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "400").Inc()
+			return
+		}
+
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, d.maxBodyBytes))
+		if err != nil {
+			logger.Warn("read body failed", "err", err)
+			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
+			metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "413").Inc()
+			return
+		}
+
+		parseStart := time.Now()
+		notes, err := d.source.Parse(body)
+		metrics.SourceParseDuration.WithLabelValues(d.source.Name()).Observe(time.Since(parseStart).Seconds())
+		if err != nil {
+			logger.Warn("parse failed", "err", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "400").Inc()
+			return
+		}
+
+		var (
+			totalAttempts int
+			totalErrors   int
+		)
+		for _, n := range notes {
+			rendered, err := d.renderer.Render(d.templateName, n)
+			if err != nil {
+				logger.Error("render failed", "fingerprint", n.Fingerprint, "err", err)
+				metrics.TemplateRenderErrors.WithLabelValues(d.templateName).Inc()
+				totalErrors++
+				totalAttempts++
+				continue
+			}
+
+			parts := telegram.SplitMessage(rendered, telegram.TelegramTextLimit)
+			if len(parts) > 1 {
+				metrics.MessageSplitTotal.Inc()
+			}
+
+			for _, target := range targets {
+				for _, part := range parts {
+					totalAttempts++
+					if err := d.send(ctx, target, part); err != nil {
+						totalErrors++
+						logger.Error("send failed",
+							"chat_id", target.ChatID,
+							"thread_id", threadIDValue(target.ThreadID),
+							"fingerprint", n.Fingerprint,
+							"err", err,
+						)
+						metrics.NotificationsSent.WithLabelValues(strconv.FormatInt(target.ChatID, 10), "error").Inc()
+						continue
+					}
+					metrics.NotificationsSent.WithLabelValues(strconv.FormatInt(target.ChatID, 10), "ok").Inc()
+				}
+			}
+		}
+
+		status := http.StatusOK
+		switch {
+		case totalAttempts == 0:
+			status = http.StatusNoContent
+		case totalErrors == 0:
+			status = http.StatusOK
+		case totalErrors < totalAttempts:
+			status = http.StatusMultiStatus
+		default:
+			status = http.StatusInternalServerError
+		}
+
+		metrics.NotificationsReceived.WithLabelValues(d.source.Name(), strconv.Itoa(status)).Inc()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprintf(w, `{"attempts":%d,"errors":%d}`, totalAttempts, totalErrors)
+	}
+}
+
+func (d webhookDeps) send(ctx context.Context, target notification.ChatTarget, text string) error {
+	err := d.tg.SendMessage(ctx, target.ChatID, target.ThreadID, text)
+	if err == nil {
+		d.readiness.RecordSendSuccess()
+		return nil
+	}
+	d.readiness.RecordSendFailure(isServerError(err))
+	return err
+}
+
+func isServerError(err error) bool {
+	var ae *telegram.APIError
+	if errors.As(err, &ae) {
+		return ae.Status() >= 500
+	}
+	return false
+}
+
+func threadIDValue(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}

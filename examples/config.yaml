@@ -1,0 +1,42 @@
+server:
+  listen_addr: ":8080"
+  read_timeout: 10s
+  write_timeout: 30s
+  shutdown_timeout: 30s
+  max_body_bytes: 1048576
+
+telegram:
+  api_url: "https://api.telegram.org"
+  parse_mode: "HTML"
+  request_timeout: 10s
+  rate_limit:
+    per_chat_per_sec: 1
+    global_per_sec: 30
+  retry:
+    max_attempts: 5
+    initial_backoff: 1s
+    max_backoff: 60s
+
+templates:
+  default: |
+    {{ severity_emoji .Severity }} <b>{{ escape_html .Title }}</b>
+    {{ if .Body }}{{ escape_html .Body }}{{ end }}
+    {{- range .Links }}
+    <a href="{{ .URL }}">{{ escape_html .Title }}</a>{{ end }}
+  alertmanager: |
+    {{ severity_emoji .Severity }} <b>[{{ .Status }}] {{ escape_html .Title }}</b>
+    {{ if .Body }}{{ escape_html .Body }}
+    {{ end -}}
+    {{- with .Labels.namespace }}<i>ns:</i> {{ escape_html . }}
+    {{ end -}}
+    {{- with .Labels.instance }}<i>instance:</i> {{ escape_html . }}
+    {{ end -}}
+    {{- range .Links }}
+    <a href="{{ .URL }}">{{ escape_html .Title }}</a>{{ end }}
+  kubewatch: |
+    {{ severity_emoji .Severity }} <b>{{ escape_html .Title }}</b>
+    {{ if .Body }}{{ escape_html .Body }}{{ end }}
+
+logging:
+  level: "info"
+  format: "json"

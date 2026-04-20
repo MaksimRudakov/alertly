@@ -1,0 +1,12 @@
+{
+  "eventmeta": {
+    "kind": "Pod",
+    "name": "api-7c8f8b8f7b-xyz",
+    "namespace": "production",
+    "reason": "Created",
+    "type": "Normal",
+    "message": "Created container api"
+  },
+  "text": "A new pod has been created in production namespace",
+  "time": "2026-04-21T10:00:00Z"
+}

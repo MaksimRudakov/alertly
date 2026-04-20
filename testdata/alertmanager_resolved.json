@@ -1,0 +1,23 @@
+{
+  "version": "4",
+  "status": "resolved",
+  "receiver": "alertly",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "HighMemoryUsage",
+        "severity": "critical",
+        "instance": "node-01:9100"
+      },
+      "annotations": {
+        "summary": "High memory usage on node-01",
+        "description": "Memory usage was at 95% on node-01"
+      },
+      "startsAt": "2026-04-21T10:00:00Z",
+      "endsAt": "2026-04-21T10:30:00Z",
+      "generatorURL": "https://prometheus.example.com/graph?g0.expr=mem",
+      "fingerprint": "abcdef1234567890"
+    }
+  ]
+}

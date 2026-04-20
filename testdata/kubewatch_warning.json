@@ -1,0 +1,12 @@
+{
+  "eventmeta": {
+    "kind": "Pod",
+    "name": "api-7c8f8b8f7b-abc",
+    "namespace": "production",
+    "reason": "BackOff",
+    "type": "Warning",
+    "message": "Back-off restarting failed container"
+  },
+  "text": "Back-off restarting failed container api in pod api-7c8f8b8f7b-abc",
+  "time": "2026-04-21T10:05:00Z"
+}

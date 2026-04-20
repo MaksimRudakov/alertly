@@ -1,0 +1,31 @@
+{
+  "version": "4",
+  "groupKey": "{}/{alertname=\"HighMemoryUsage\"}:{}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "alertly",
+  "groupLabels": {"alertname": "HighMemoryUsage"},
+  "commonLabels": {"alertname": "HighMemoryUsage", "severity": "critical"},
+  "commonAnnotations": {"summary": "High memory usage on node"},
+  "externalURL": "https://alertmanager.example.com",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighMemoryUsage",
+        "severity": "critical",
+        "instance": "node-01:9100",
+        "job": "node-exporter"
+      },
+      "annotations": {
+        "summary": "High memory usage on node-01",
+        "description": "Memory usage is at 95% on node-01",
+        "runbook_url": "https://wiki.example.com/runbooks/high-mem"
+      },
+      "startsAt": "2026-04-21T10:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://prometheus.example.com/graph?g0.expr=mem%3E0.95",
+      "fingerprint": "abcdef1234567890"
+    }
+  ]
+}

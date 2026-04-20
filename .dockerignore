@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.vscode
+bin
+dist
+testdata
+*.md
+Dockerfile
+Makefile
+.golangci.yaml
+.dockerignore
+.gitignore
+coverage.html
+*.out

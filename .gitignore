@@ -1,0 +1,11 @@
+/bin/
+/dist/
+*.test
+*.out
+coverage.html
+.idea/
+.vscode/
+.env
+.env.local
+*.local.yaml
+TODO.md
