@@ -1,38 +1,41 @@
+version: "2"
+
 run:
   timeout: 5m
   tests: true
 
 linters:
-  disable-all: true
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - unused
+    - staticcheck
+    - gosec
+    - revive
+  settings:
+    gosec:
+      excludes:
+        - G104
+      includes:
+        - G101
+        - G304
+    revive:
+      rules:
+        - name: var-naming
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+
+formatters:
   enable:
     - gofmt
     - goimports
-    - govet
-    - staticcheck
-    - errcheck
-    - ineffassign
-    - unused
-    - gosec
-    - revive
-
-linters-settings:
-  gosec:
-    excludes:
-      - G104
-    includes:
-      - G101
-      - G304
-  revive:
-    rules:
-      - name: var-naming
-      - name: exported
-        disabled: true
-      - name: package-comments
-        disabled: true
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gosec
-        - errcheck
