@@ -14,8 +14,8 @@ import (
 
 	"github.com/MaksimRudakov/alertly/internal/config"
 	"github.com/MaksimRudakov/alertly/internal/source"
-	tmpl "github.com/MaksimRudakov/alertly/internal/template"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
+	tmpl "github.com/MaksimRudakov/alertly/internal/template"
 )
 
 type Server struct {

@@ -138,10 +138,6 @@ make docker      # multi-stage image -> alertly:dev
 make run         # run with examples/config.yaml
 ```
 
-## Roadmap
-
-See [TODO.md](./TODO.md) and GitHub Milestones.
-
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md). Bugs and ideas → [Issues](https://github.com/MaksimRudakov/alertly/issues), questions → [Discussions](https://github.com/MaksimRudakov/alertly/discussions).

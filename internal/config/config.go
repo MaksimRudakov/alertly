@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	DefaultPath          = "/etc/alertly/config.yaml"
-	defaultTemplate      = `{{ severity_emoji .Severity }} <b>{{ escape_html .Title }}</b>
+	DefaultPath     = "/etc/alertly/config.yaml"
+	defaultTemplate = `{{ severity_emoji .Severity }} <b>{{ escape_html .Title }}</b>
 {{ if .Body }}{{ escape_html .Body }}{{ end }}`
 )
 
@@ -90,7 +90,7 @@ func Default() Config {
 func Load(path string) (Config, error) {
 	cfg := Default()
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- config path is operator-supplied by design
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
