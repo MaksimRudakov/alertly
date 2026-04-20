@@ -195,7 +195,7 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) err
 	if err != nil {
 		return fmt.Errorf("http call: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 

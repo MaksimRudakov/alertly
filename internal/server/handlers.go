@@ -12,8 +12,8 @@ import (
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/notification"
 	"github.com/MaksimRudakov/alertly/internal/source"
-	tmpl "github.com/MaksimRudakov/alertly/internal/template"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
+	tmpl "github.com/MaksimRudakov/alertly/internal/template"
 )
 
 type webhookDeps struct {
@@ -95,7 +95,7 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			}
 		}
 
-		status := http.StatusOK
+		var status int
 		switch {
 		case totalAttempts == 0:
 			status = http.StatusNoContent
@@ -111,7 +111,7 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		fmt.Fprintf(w, `{"attempts":%d,"errors":%d}`, totalAttempts, totalErrors)
+		_, _ = fmt.Fprintf(w, `{"attempts":%d,"errors":%d}`, totalAttempts, totalErrors)
 	}
 }
 

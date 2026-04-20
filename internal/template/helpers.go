@@ -10,11 +10,11 @@ import (
 
 func defaultFuncMap() template.FuncMap {
 	return template.FuncMap{
-		"severity_emoji":     SeverityEmoji,
-		"escape_html":        EscapeHTML,
-		"truncate":           Truncate,
-		"join":               JoinStrings,
-		"humanize_duration":  HumanizeDuration,
+		"severity_emoji":    SeverityEmoji,
+		"escape_html":       EscapeHTML,
+		"truncate":          Truncate,
+		"join":              JoinStrings,
+		"humanize_duration": HumanizeDuration,
 	}
 }
 

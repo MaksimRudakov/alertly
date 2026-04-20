@@ -18,11 +18,11 @@ type ReadinessTracker interface {
 }
 
 type readiness struct {
-	mu              sync.Mutex
-	ready           bool
-	reason          string
-	consecFails     int
-	lastCheck       atomic.Pointer[time.Time]
+	mu          sync.Mutex
+	ready       bool
+	reason      string
+	consecFails int
+	lastCheck   atomic.Pointer[time.Time]
 }
 
 func NewReadiness() ReadinessTracker {
