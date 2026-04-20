@@ -80,10 +80,25 @@ jobs:
           output-file: sbom.spdx.json
           upload-release-assets: true
 
+  detect-charts:
+    runs-on: ubuntu-latest
+    outputs:
+      has_charts: ${{ steps.check.outputs.has_charts }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if compgen -G "charts/*/Chart.yaml" > /dev/null; then
+            echo "has_charts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_charts=false" >> "$GITHUB_OUTPUT"
+            echo "No charts/*/Chart.yaml found; chart-release will be skipped."
+          fi
+
   chart-release:
     runs-on: ubuntu-latest
-    needs: docker
-    if: hashFiles('charts/**/Chart.yaml') != ''
+    needs: [docker, detect-charts]
+    if: needs.detect-charts.outputs.has_charts == 'true'
     steps:
       - uses: actions/checkout@v6
         with:
