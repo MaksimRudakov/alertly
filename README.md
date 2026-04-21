@@ -30,38 +30,122 @@ docker run --rm -p 8080:8080 \
   ghcr.io/maksimrudakov/alertly:latest
 ```
 
-## Quick start (Helm)
+## Installation (Helm)
+
+### Prerequisites
+
+- Kubernetes 1.25+ (probes use `startupProbe`-compatible semantics).
+- Helm 3.8+ (required for OCI install; any 3.x works for the HTTP repo).
+- A Telegram bot token from [@BotFather](https://t.me/BotFather) and any random string for `WEBHOOK_AUTH_TOKEN` (at least 32 chars recommended).
+- The bot added to the target chat(s); get the chat ID from [@RawDataBot](https://t.me/RawDataBot) or your own method.
+
+### Add the chart repository
+
+HTTP (GitHub Pages):
 
 ```bash
-helm repo add alertly https://maksimrudakov.github.io/alertly/
+helm repo add alertly https://maksimrudakov.github.io/alertly
 helm repo update
+helm search repo alertly
+```
+
+OCI (GitHub Container Registry, no `helm repo add` needed):
+
+```bash
+helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.0.1
+```
+
+### Install
+
+Quick install with tokens passed directly (fine for a lab / personal cluster — **NOT for production**, tokens end up in Helm history):
+
+```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
+  --version 0.0.1 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
 
-OCI install (helm ≥ 3.8):
+Or from OCI:
 
 ```bash
 helm install alertly oci://ghcr.io/maksimrudakov/charts/alertly \
-  --version 0.0.1 \
   --namespace monitoring-system --create-namespace \
+  --version 0.0.1 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
 
-For production use an existing Secret (managed by external-secrets/sealed-secrets/vault):
+### Production install (external Secret)
+
+Create a Secret out of band (external-secrets / sealed-secrets / vault / whatever you use) with the two expected keys:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertly-tokens
+  namespace: monitoring-system
+type: Opaque
+stringData:
+  TELEGRAM_BOT_TOKEN: "<TOKEN>"
+  WEBHOOK_AUTH_TOKEN: "<TOKEN>"
+```
+
+Then install referencing it:
 
 ```bash
 helm install alertly alertly/alertly \
+  --namespace monitoring-system --create-namespace \
+  --version 0.0.1 \
   --set secret.create=false \
-  --set secret.existingSecret=alertly-tokens
+  --set secret.existingSecret=alertly-tokens \
+  --set reloader.enabled=true   # optional: auto-restart on Secret/ConfigMap changes
 ```
 
-Chart reference: [`charts/alertly/README.md`](./charts/alertly/README.md).
+For a fully declarative setup pass a values file instead of `--set` flags — see [`charts/alertly/values.yaml`](./charts/alertly/values.yaml) for the full schema.
 
-Both the chart tarball (GitHub Release) and the OCI chart are cosign-signed (keyless, Fulcio/Rekor).
+### Verify signatures
+
+Both the chart tarball (attached to the GitHub Release) and the OCI chart manifest are **cosign-signed, keyless (Fulcio/Rekor)**. Verify either before installing in a high-trust environment:
+
+```bash
+# OCI manifest
+cosign verify \
+  --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/maksimrudakov/charts/alertly:0.0.1
+
+# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.0.1 release)
+cosign verify-blob \
+  --certificate alertly-0.0.1.tgz.pem \
+  --signature alertly-0.0.1.tgz.sig \
+  --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  alertly-0.0.1.tgz
+```
+
+The container image `ghcr.io/maksimrudakov/alertly` is signed the same way.
+
+### Upgrade
+
+```bash
+helm repo update
+helm upgrade alertly alertly/alertly --namespace monitoring-system --version <new-version> --reuse-values
+```
+
+### Uninstall
+
+```bash
+helm uninstall alertly --namespace monitoring-system
+```
+
+The externally-managed Secret is not deleted (it was not created by the release).
+
+### Values reference
+
+Full list of values with defaults and descriptions: [`charts/alertly/README.md`](./charts/alertly/README.md) (auto-generated from `values.yaml`).
 
 ## Endpoints
 
