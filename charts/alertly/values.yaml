@@ -1,0 +1,223 @@
+## alertly — Helm chart values
+## See https://github.com/MaksimRudakov/alertly for documentation.
+
+# -- Number of alertly replicas. alertly is stateless; 1 is enough for most setups.
+replicaCount: 1
+
+image:
+  # -- Container image repository.
+  repository: ghcr.io/maksimrudakov/alertly
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Image tag. Overrides `Chart.AppVersion` when set.
+  tag: ""
+
+# -- Pull secrets for private registries.
+imagePullSecrets: []
+
+# -- Override chart name.
+nameOverride: ""
+# -- Override full release name.
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a ServiceAccount for the pod.
+  create: true
+  # -- Annotations for the ServiceAccount.
+  annotations: {}
+  # -- Whether to mount the ServiceAccount token into the pod. alertly does not talk to the Kubernetes API.
+  automountServiceAccountToken: false
+  # -- Use an existing ServiceAccount instead of creating one. Falls back to release fullname when empty and `create: true`.
+  name: ""
+
+# -- Extra annotations for the pod.
+podAnnotations: {}
+# -- Extra labels for the pod.
+podLabels: {}
+
+# -- Pod-level security context.
+podSecurityContext:
+  fsGroup: 65532
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context. Hardened defaults — read-only rootfs, non-root, all caps dropped.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  capabilities:
+    drop:
+      - ALL
+
+# -- CPU/memory requests and limits.
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+probes:
+  # -- Liveness probe. Matches unconditional `/healthz`.
+  liveness:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  # -- Readiness probe. `/readyz` flips unready on sustained 5xx from Telegram or during startup getMe.
+  readiness:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+service:
+  # -- Service type. Default ClusterIP — Alertmanager and Kubewatch typically run in the same cluster.
+  type: ClusterIP
+  # -- Service port.
+  port: 8080
+  # -- Extra annotations for the Service.
+  annotations: {}
+
+ingress:
+  # -- Enable Ingress for the alertly webhook endpoint.
+  enabled: false
+  # -- IngressClass name.
+  className: ""
+  # -- Ingress annotations (basic-auth, cert-manager, rate-limits, etc).
+  annotations: {}
+  # -- Ingress host/path rules.
+  hosts:
+    - host: alertly.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- Ingress TLS blocks.
+  tls: []
+
+secret:
+  # -- Create the Secret with tokens provided in `secret.values`. WARNING — NOT for production; tokens end up in Helm history. For production set `create: false` and supply the Secret via external-secrets/sealed-secrets/vault.
+  create: true
+  # -- Name of an existing Secret to use when `create: false`. Defaults to release fullname when empty.
+  existingSecret: ""
+  # -- Key names inside the Secret. Must match the env vars alertly reads (`TELEGRAM_BOT_TOKEN`, `WEBHOOK_AUTH_TOKEN`).
+  keys:
+    botToken: TELEGRAM_BOT_TOKEN
+    webhookAuth: WEBHOOK_AUTH_TOKEN
+  # -- Token values used only when `create: true`.
+  values:
+    telegramBotToken: ""
+    webhookAuthToken: ""
+
+# -- Env vars passed to the container. Keys become env names, values are quoted as strings.
+env:
+  LOG_LEVEL: info
+
+# -- Extra env vars in full k8s EnvVar form (supports `valueFrom`).
+extraEnv: []
+
+# -- Grace period before SIGKILL.
+terminationGracePeriodSeconds: 30
+
+# -- Pod nodeSelector.
+nodeSelector: {}
+# -- Pod tolerations.
+tolerations: []
+# -- Pod affinity rules.
+affinity: {}
+# -- Pod topology spread constraints.
+topologySpreadConstraints: []
+# -- Pod priorityClassName.
+priorityClassName: ""
+
+reloader:
+  # -- Add `reloader.stakater.com/auto: "true"` annotation to the Deployment to auto-restart on ConfigMap/Secret content changes. Requires stakater/Reloader in the cluster.
+  enabled: false
+
+# -- Alertly runtime configuration. Serialized verbatim into the ConfigMap mounted at `/etc/alertly/config.yaml`.
+# @default -- see `values.yaml`
+config:
+  server:
+    listen_addr: ":8080"
+    read_timeout: 10s
+    write_timeout: 30s
+    shutdown_timeout: 30s
+    max_body_bytes: 1048576
+  telegram:
+    api_url: "https://api.telegram.org"
+    parse_mode: "HTML"
+    request_timeout: 10s
+    rate_limit:
+      per_chat_per_sec: 1
+      global_per_sec: 30
+    retry:
+      max_attempts: 5
+      initial_backoff: 1s
+      max_backoff: 60s
+  templates:
+    default: |
+      {{ severity_emoji .Severity }} <b>{{ escape_html .Title }}</b>
+      {{ if .Body }}{{ escape_html .Body }}{{ end }}
+      {{- range .Links }}
+      <a href="{{ .URL }}">{{ escape_html .Title }}</a>{{ end }}
+    alertmanager: |
+      <b>{{ escape_html .Title }}</b>
+      <b>Status:</b> {{ if eq .Status "firing" }}Firing 🔥{{ else if eq .Status "resolved" }}Resolved ✅{{ else }}{{ escape_html .Status }}{{ end }}
+      {{- if .Body }}
+      {{ escape_html .Body }}
+      {{- end }}
+      {{- range .Links }}
+      <a href="{{ .URL }}">{{ escape_html .Title }} URL</a>
+      {{- end }}
+
+      <b>Alert Name:</b> {{ escape_html (index .Labels "alertname") }}
+      <b>Severity:</b> {{ .Severity }} {{ severity_emoji .Severity }}
+    kubewatch: |
+      {{ severity_emoji .Severity }} <b>{{ escape_html .Title }}</b>
+      {{ if .Body }}{{ escape_html .Body }}{{ end }}
+  logging:
+    level: "info"
+    format: "json"
+
+# -- Raw manifests rendered as-is. Use for PodMonitor/ServiceMonitor, PDB, NetworkPolicy, etc. without forking the chart.
+#
+# Example — PodMonitor for kube-prometheus-stack:
+# extraManifests:
+#   - apiVersion: monitoring.coreos.com/v1
+#     kind: PodMonitor
+#     metadata:
+#       name: alertly
+#       labels:
+#         release: kube-prometheus-stack
+#     spec:
+#       selector:
+#         matchLabels:
+#           app.kubernetes.io/name: alertly
+#       podMetricsEndpoints:
+#         - port: http
+#           path: /metrics
+#           interval: 30s
+#
+# Example — PodDisruptionBudget:
+# extraManifests:
+#   - apiVersion: policy/v1
+#     kind: PodDisruptionBudget
+#     metadata:
+#       name: alertly
+#     spec:
+#       maxUnavailable: 0
+#       selector:
+#         matchLabels:
+#           app.kubernetes.io/name: alertly
+extraManifests: []
