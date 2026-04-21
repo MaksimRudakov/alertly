@@ -1,0 +1,85 @@
+# Kubewatch webhook handler config pointing at alertly.
+#
+# This snippet is for the robusta-dev/kubewatch fork (the maintained one).
+# Original bitnami-labs/kubewatch (archived) does not support custom headers
+# on the webhook handler; if you are stuck on it, put a sidecar/reverse-proxy
+# in front of alertly to inject the Authorization header.
+#
+# Mount this ConfigMap as /root/.kubewatch.yaml (or set --config-file).
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubewatch
+  namespace: monitoring-system
+data:
+  .kubewatch.yaml: |
+    handler:
+      webhook:
+        url: http://alertly.monitoring-system.svc:8080/v1/kubewatch/-1001234567890
+        # robusta-dev/kubewatch supports custom headers; bitnami-labs/kubewatch does not.
+        headers:
+          Authorization: "Bearer <WEBHOOK_AUTH_TOKEN>"
+
+    # Only enable the resource/event kinds you actually want piped to Telegram.
+    # Noisy kinds (pods, configmaps, services) can bury signal in volume.
+    resource:
+      deployment: true
+      pod: false
+      replicaset: false
+      replicationcontroller: false
+      services: false
+      configmap: false
+      secret: false
+      daemonset: true
+      statefulset: true
+      job: true
+      node: true
+      clusterrole: false
+      serviceaccount: false
+      persistentvolume: true
+      namespace: false
+      ingress: true
+      event: true   # warnings/errors — useful signal
+
+    # Optional: restrict to a set of namespaces.
+    # namespace: "production,staging"
+
+---
+# Example Deployment — keep in a separate file in a real setup.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubewatch
+  namespace: monitoring-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubewatch
+  template:
+    metadata:
+      labels:
+        app: kubewatch
+    spec:
+      serviceAccountName: kubewatch
+      containers:
+        - name: kubewatch
+          image: ghcr.io/robusta-dev/kubewatch:latest
+          volumeMounts:
+            - name: config
+              mountPath: /root
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: kubewatch
+            items:
+              - key: .kubewatch.yaml
+                path: .kubewatch.yaml

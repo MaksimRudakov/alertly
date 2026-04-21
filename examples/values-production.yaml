@@ -1,0 +1,125 @@
+# Production-ish values for the alertly chart.
+#
+# Install:
+#   helm install alertly alertly/alertly \
+#     --namespace monitoring-system --create-namespace \
+#     --version 0.0.1 \
+#     -f examples/values-production.yaml
+#
+# Prerequisites:
+#   - A Secret named `alertly-tokens` in the release namespace with keys
+#     TELEGRAM_BOT_TOKEN and WEBHOOK_AUTH_TOKEN — typically provisioned by
+#     external-secrets, sealed-secrets, or vault-csi.
+#   - stakater/Reloader installed in the cluster (for `reloader.enabled`).
+#   - kube-prometheus-stack (or any operator watching PodMonitor) installed
+#     if you want scraping via the PodMonitor in extraManifests.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/maksimrudakov/alertly
+  pullPolicy: IfNotPresent
+  # Pin to a concrete tag in prod; do not rely on `latest`.
+  tag: ""
+
+# Keep tokens out of Helm history — use an externally-managed Secret.
+secret:
+  create: false
+  existingSecret: alertly-tokens
+  keys:
+    botToken: TELEGRAM_BOT_TOKEN
+    webhookAuth: WEBHOOK_AUTH_TOKEN
+
+# Auto-restart the Deployment on ConfigMap/Secret content changes.
+reloader:
+  enabled: true
+
+env:
+  LOG_LEVEL: info
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Spread across zones when the cluster has them; harmless if it does not.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: alertly
+
+# Escape hatch for cluster-scoped artifacts we don't template natively
+# (PodMonitor / NetworkPolicy / PDB). Kept here so the chart itself stays
+# minimal and CRD-agnostic.
+extraManifests:
+  - apiVersion: policy/v1
+    kind: PodDisruptionBudget
+    metadata:
+      name: alertly
+    spec:
+      maxUnavailable: 0
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: alertly
+
+  # Adjust `release:` label to match your Prometheus operator selector.
+  - apiVersion: monitoring.coreos.com/v1
+    kind: PodMonitor
+    metadata:
+      name: alertly
+      labels:
+        release: kube-prometheus-stack
+    spec:
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: alertly
+      podMetricsEndpoints:
+        - port: http
+          path: /metrics
+          interval: 30s
+          scrapeTimeout: 10s
+
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: alertly
+    spec:
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: alertly
+      policyTypes: [Ingress, Egress]
+      ingress:
+        # Allow Alertmanager and Kubewatch (both in monitoring-system) to post webhooks.
+        - from:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: monitoring-system
+          ports:
+            - protocol: TCP
+              port: 8080
+      egress:
+        # Cluster DNS.
+        - to:
+            - namespaceSelector: {}
+              podSelector:
+                matchLabels:
+                  k8s-app: kube-dns
+          ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+        # Telegram Bot API. CIDR is coarse because Telegram does not publish a stable IP range;
+        # tighten with a ServiceEntry/egress-gateway if your platform supports hostname egress.
+        - to:
+            - ipBlock:
+                cidr: 0.0.0.0/0
+          ports:
+            - protocol: TCP
+              port: 443
