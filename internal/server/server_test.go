@@ -35,14 +35,19 @@ type capturedSend struct {
 }
 
 type telegramRecorder struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	sent []capturedSend
+	srv      *httptest.Server
+	mu       sync.Mutex
+	sent     []capturedSend
+	override func(chatID int64) (status int, body string) // nil = always 200/OK
 }
 
 func newTelegramRecorder(t *testing.T) *telegramRecorder {
+	return newTelegramRecorderWith(t, nil)
+}
+
+func newTelegramRecorderWith(t *testing.T, override func(chatID int64) (int, string)) *telegramRecorder {
 	t.Helper()
-	r := &telegramRecorder{}
+	r := &telegramRecorder{override: override}
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
 		case strings.HasSuffix(req.URL.Path, "/getMe"):
@@ -64,6 +69,13 @@ func newTelegramRecorder(t *testing.T) *telegramRecorder {
 				ParseMode: p.ParseMode,
 			})
 			r.mu.Unlock()
+			if r.override != nil {
+				if status, body := r.override(p.ChatID); status != 0 {
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, body)
+					return
+				}
+			}
 			_, _ = io.WriteString(w, `{"ok":true}`)
 		default:
 			http.NotFound(w, req)
@@ -319,5 +331,169 @@ func TestE2EMetricsEndpoint(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("metrics: %d", resp.StatusCode)
+	}
+}
+
+// TestE2EMultiStatus207: one chat succeeds, another fails with 4xx
+// (non-retryable) → handler returns 207 Multi-Status.
+func TestE2EMultiStatus207(t *testing.T) {
+	rec := newTelegramRecorderWith(t, func(chatID int64) (int, string) {
+		if chatID == -101 {
+			return 400, `{"ok":false,"description":"chat not found"}`
+		}
+		return 0, "" // default ok
+	})
+	ts := newTestServer(t, rec, 1000)
+
+	resp := doPost(t, ts.URL, "/v1/alertmanager/-100,-101", loadFixture(t, "alertmanager_firing.json"), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMultiStatus {
+		t.Fatalf("expected 207, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"attempts":2`) || !strings.Contains(string(body), `"errors":1`) {
+		t.Errorf("body: %s", body)
+	}
+}
+
+// TestE2EAllFailed500: every chat fails → handler returns 500.
+func TestE2EAllFailed500(t *testing.T) {
+	rec := newTelegramRecorderWith(t, func(int64) (int, string) {
+		return 400, `{"ok":false,"description":"bad request"}`
+	})
+	ts := newTestServer(t, rec, 1000)
+
+	resp := doPost(t, ts.URL, "/v1/alertmanager/-100,-101", loadFixture(t, "alertmanager_firing.json"), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"errors":2`) {
+		t.Errorf("body: %s", body)
+	}
+}
+
+// TestE2EInvalidChatsReturns400: malformed {chats} path → 400 from handler.
+func TestE2EInvalidChatsReturns400(t *testing.T) {
+	rec := newTelegramRecorder(t)
+	ts := newTestServer(t, rec, 1000)
+
+	resp := doPost(t, ts.URL, "/v1/alertmanager/not-a-number", loadFixture(t, "alertmanager_firing.json"), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestE2EParseErrorReturns400: valid chats but invalid source payload → 400.
+func TestE2EParseErrorReturns400(t *testing.T) {
+	rec := newTelegramRecorder(t)
+	ts := newTestServer(t, rec, 1000)
+
+	resp := doPost(t, ts.URL, "/v1/alertmanager/-100", []byte("not-json"), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestIsServerError — unit-test the helper that drives readiness.
+func TestIsServerError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error returns false", nil, false},
+		{"non-api error returns false", context.Canceled, false},
+		{"api 400 returns false", &telegram.APIError{StatusCode: 400}, false},
+		{"api 429 returns false", &telegram.APIError{StatusCode: 429}, false},
+		{"api 500 returns true", &telegram.APIError{StatusCode: 500}, true},
+		{"api 503 returns true", &telegram.APIError{StatusCode: 503}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isServerError(c.err); got != c.want {
+				t.Errorf("got %v want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestRecoverMiddleware: a panicking handler should yield 500, not crash.
+func TestRecoverMiddleware(t *testing.T) {
+	panicking := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	})
+	mux := http.NewServeMux()
+	mux.Handle("GET /panic", panicking)
+	handler := chain(mux,
+		recoverMiddleware,
+		requestIDMiddleware,
+		loggingMiddleware(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/panic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 after panic, got %d", resp.StatusCode)
+	}
+}
+
+// TestServerRunGracefulShutdown: ctx cancel → Run returns nil within timeout.
+func TestServerRunGracefulShutdown(t *testing.T) {
+	rec := newTelegramRecorder(t)
+
+	metrics.Init()
+	registry := prometheus.NewRegistry()
+	limiter := telegram.NewLimiter(1000, 1000)
+	tg := telegram.New(telegram.Config{
+		APIURL: rec.srv.URL, Token: "t", ParseMode: "HTML",
+		RequestTimeout: time.Second, MaxAttempts: 1,
+		InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+	}, limiter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	renderer, err := tmpl.New(map[string]string{tmpl.DefaultName: `{{ .Title }}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srvCfg := config.Default().Server
+	srvCfg.ListenAddr = "127.0.0.1:0" // OS-assigned port; avoids conflict on reruns
+	srvCfg.ShutdownTimeout = 2 * time.Second
+
+	s := New(srvCfg, Deps{
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Sources:   map[string]source.Source{"alertmanager": source.NewAlertmanager()},
+		Renderer:  renderer,
+		Telegram:  tg,
+		Readiness: NewReadiness(),
+		AuthToken: authToken,
+		Registry:  registry,
+	})
+
+	// Bind the listener before Run picks it up — we can't easily introspect
+	// the OS-assigned port otherwise. Swap the handler's Server to one with
+	// a pre-bound listener via a little helper call below.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+
+	// Give the listener a moment to bind.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("graceful shutdown returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of ctx cancel")
 	}
 }
