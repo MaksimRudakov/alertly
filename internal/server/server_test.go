@@ -446,6 +446,70 @@ func TestRecoverMiddleware(t *testing.T) {
 	}
 }
 
+// TestSourceParseDurationMetric: the histogram observes a sample on every
+// webhook call regardless of whether Parse succeeds or fails (handler
+// Observe()s before inspecting the error).
+func TestSourceParseDurationMetric(t *testing.T) {
+	rec := newTelegramRecorder(t)
+	ts := newTestServer(t, rec, 1000)
+
+	countBefore, sumBefore := parseDurationHistogram(t, "alertmanager")
+
+	// Happy path — valid payload.
+	resp := doPost(t, ts.URL, "/v1/alertmanager/-100", loadFixture(t, "alertmanager_firing.json"), nil)
+	resp.Body.Close()
+	countAfterOK, sumAfterOK := parseDurationHistogram(t, "alertmanager")
+	if countAfterOK != countBefore+1 {
+		t.Errorf("after valid payload: count %d -> %d, expected +1", countBefore, countAfterOK)
+	}
+	if sumAfterOK <= sumBefore {
+		t.Errorf("after valid payload: sum did not grow (%v -> %v)", sumBefore, sumAfterOK)
+	}
+
+	// Parse-error path — malformed JSON still triggers Parse and still Observe()s.
+	resp = doPost(t, ts.URL, "/v1/alertmanager/-100", []byte("not-json"), nil)
+	resp.Body.Close()
+	countAfterErr, _ := parseDurationHistogram(t, "alertmanager")
+	if countAfterErr != countAfterOK+1 {
+		t.Errorf("after parse error: count %d -> %d, expected +1", countAfterOK, countAfterErr)
+	}
+
+	// Labels must not leak between sources.
+	if countKW, _ := parseDurationHistogram(t, "kubewatch"); countKW != 0 && countKW == countAfterErr {
+		t.Errorf("alertmanager count leaked into kubewatch source label")
+	}
+}
+
+// parseDurationHistogram returns (sample_count, sample_sum) for
+// alertly_source_parse_duration_seconds{source=<src>} from the global registry.
+func parseDurationHistogram(t *testing.T, src string) (uint64, float64) {
+	t.Helper()
+	mfs, err := metrics.Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "alertly_source_parse_duration_seconds" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			match := false
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "source" && lp.GetValue() == src {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+			h := m.GetHistogram()
+			return h.GetSampleCount(), h.GetSampleSum()
+		}
+	}
+	return 0, 0
+}
+
 // TestServerRunGracefulShutdown: ctx cancel → Run returns nil within timeout.
 func TestServerRunGracefulShutdown(t *testing.T) {
 	rec := newTelegramRecorder(t)

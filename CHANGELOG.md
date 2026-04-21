@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Tests
 - `internal/server` coverage raised from **62.7% → 90.8%**: new unit tests for `ReadinessTracker` (`MarkReady` / `MarkUnready` / `RecordSendFailure` — including the 10-failure window, client-error ignore path, and success-reset), handler multi-status (`207`) and all-failed (`500`) branches, `400` paths (invalid chat list, source parse error), `isServerError` table test (nil / non-api / 4xx / 429 / 5xx), `recoverMiddleware` panic path, and `Server.Run` graceful shutdown on ctx cancel.
+- `alertly_source_parse_duration_seconds` histogram — new test asserts the sample count grows by 1 on both the happy path and the parse-error path, that the sum is positive, and that the `source` label does not leak between sources.
 
 ### Changed
 - `release.yaml`: dropped the standalone `anchore/sbom-action` step. SBOM is already produced by `docker/build-push-action` (`sbom: true`) and attached to the image as an OCI attestation, so the extra step was redundant and was failing on syft exit code 1.
