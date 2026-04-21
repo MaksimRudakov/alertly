@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+- `examples/alertmanager-config.yaml` — Alertmanager receiver config with Bearer-token auth, multi-chat URL and per-chat forum-thread (`:thread_id`) routing.
+- `examples/kubewatch-config.yaml` — robusta-dev/kubewatch ConfigMap + Deployment pointing at alertly with an `Authorization: Bearer` header.
+- `examples/values-production.yaml` — production values for the Helm chart: external-secret (`secret.create=false`), Reloader, topology spread, PDB/PodMonitor/NetworkPolicy rendered via `extraManifests`.
+- `testdata/alertmanager_long.json` — fixture with a >10 KB description to exercise the 4096-byte splitter end-to-end; verified locally that one notification produces 3 Telegram messages and increments `alertly_message_split_total`.
+
 ### Changed
 - `release.yaml`: dropped the standalone `anchore/sbom-action` step. SBOM is already produced by `docker/build-push-action` (`sbom: true`) and attached to the image as an OCI attestation, so the extra step was redundant and was failing on syft exit code 1.
 

@@ -1,0 +1,60 @@
+# Alertmanager configuration snippet wiring a receiver to alertly.
+#
+# Works with Alertmanager 0.25+. Uses the `authorization` block for Bearer-token
+# auth — the token value is read from a file that you must provision alongside
+# Alertmanager (e.g. via a Secret volume).
+#
+# Endpoint format:
+#   http://<alertly-service>:8080/v1/alertmanager/<chat_id>[,<chat_id>[:<thread_id>]]...
+#
+# Multiple chats and per-chat forum threads are supported in a single URL.
+
+route:
+  group_by: ['alertname', 'namespace']
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 3h
+  receiver: alertly-default
+
+  routes:
+    # critical → main ops chat and a dedicated thread in the team forum
+    - matchers:
+        - severity="critical"
+      receiver: alertly-critical
+      continue: false
+
+    # warnings → team forum, non-critical thread
+    - matchers:
+        - severity="warning"
+      receiver: alertly-warning
+      continue: false
+
+receivers:
+  - name: alertly-default
+    webhook_configs:
+      - url: 'http://alertly.monitoring-system.svc:8080/v1/alertmanager/-1001234567890'
+        send_resolved: true
+        max_alerts: 0   # 0 = no limit; alertly splits messages internally
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/alertly-webhook-token
+
+  - name: alertly-critical
+    webhook_configs:
+      # fan out to: main ops chat + dedicated critical thread in team forum (:42)
+      - url: 'http://alertly.monitoring-system.svc:8080/v1/alertmanager/-1001234567890,-1009876543210:42'
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/alertly-webhook-token
+
+  - name: alertly-warning
+    webhook_configs:
+      - url: 'http://alertly.monitoring-system.svc:8080/v1/alertmanager/-1009876543210:58'
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/alertly-webhook-token
