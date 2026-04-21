@@ -2,8 +2,8 @@ apiVersion: v2
 name: alertly
 description: Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 type: application
-version: 0.0.1
-appVersion: "0.0.2"
+version: 0.0.2
+appVersion: "0.0.3"
 home: https://github.com/MaksimRudakov/alertly
 sources:
   - https://github.com/MaksimRudakov/alertly
