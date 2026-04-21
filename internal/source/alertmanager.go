@@ -22,13 +22,12 @@ type amPayload struct {
 }
 
 type amAlert struct {
-	Status       string            `json:"status"`
-	Labels       map[string]string `json:"labels"`
-	Annotations  map[string]string `json:"annotations"`
-	StartsAt     time.Time         `json:"startsAt"`
-	EndsAt       time.Time         `json:"endsAt"`
-	GeneratorURL string            `json:"generatorURL"`
-	Fingerprint  string            `json:"fingerprint"`
+	Status      string            `json:"status"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	StartsAt    time.Time         `json:"startsAt"`
+	EndsAt      time.Time         `json:"endsAt"`
+	Fingerprint string            `json:"fingerprint"`
 }
 
 func (alertmanager) Parse(body []byte) ([]notification.Notification, error) {
@@ -56,10 +55,7 @@ func alertToNotification(a amAlert) notification.Notification {
 	title := firstNonEmpty(a.Annotations["summary"], a.Labels["alertname"])
 	body := firstNonEmpty(a.Annotations["description"], a.Annotations["message"])
 
-	links := make([]notification.Link, 0, 2)
-	if a.GeneratorURL != "" {
-		links = append(links, notification.Link{Title: "Generator", URL: a.GeneratorURL})
-	}
+	links := make([]notification.Link, 0, 1)
 	if v := a.Annotations["runbook_url"]; v != "" {
 		links = append(links, notification.Link{Title: "Runbook", URL: v})
 	}

@@ -30,15 +30,38 @@ docker run --rm -p 8080:8080 \
   ghcr.io/maksimrudakov/alertly:latest
 ```
 
-## Quick start (Helm — coming in v0.1.0)
+## Quick start (Helm)
 
 ```bash
 helm repo add alertly https://maksimrudakov.github.io/alertly/
+helm repo update
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --set telegram.botToken=<TOKEN> \
-  --set webhook.authToken=<TOKEN>
+  --set secret.values.telegramBotToken=<TOKEN> \
+  --set secret.values.webhookAuthToken=<TOKEN>
 ```
+
+OCI install (helm ≥ 3.8):
+
+```bash
+helm install alertly oci://ghcr.io/maksimrudakov/charts/alertly \
+  --version 0.0.1 \
+  --namespace monitoring-system --create-namespace \
+  --set secret.values.telegramBotToken=<TOKEN> \
+  --set secret.values.webhookAuthToken=<TOKEN>
+```
+
+For production use an existing Secret (managed by external-secrets/sealed-secrets/vault):
+
+```bash
+helm install alertly alertly/alertly \
+  --set secret.create=false \
+  --set secret.existingSecret=alertly-tokens
+```
+
+Chart reference: [`charts/alertly/README.md`](./charts/alertly/README.md).
+
+Both the chart tarball (GitHub Release) and the OCI chart are cosign-signed (keyless, Fulcio/Rekor).
 
 ## Endpoints
 

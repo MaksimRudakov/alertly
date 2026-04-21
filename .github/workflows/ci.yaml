@@ -83,3 +83,37 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: 1
           ignore-unfixed: true
+
+  chart-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.0
+      - name: helm lint
+        run: helm lint charts/alertly
+      - name: helm template (defaults)
+        run: |
+          helm template test charts/alertly \
+            --set secret.values.telegramBotToken=ci \
+            --set secret.values.webhookAuthToken=ci > /tmp/rendered.yaml
+      - name: helm template (ingress + reloader + extraManifests)
+        run: |
+          helm template test charts/alertly \
+            --set secret.values.telegramBotToken=ci \
+            --set secret.values.webhookAuthToken=ci \
+            --set ingress.enabled=true \
+            --set reloader.enabled=true > /tmp/rendered-full.yaml
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install helm-docs
+        run: go install github.com/norwoodj/helm-docs/cmd/helm-docs@latest
+      - name: helm-docs check (charts/alertly/README.md must be up to date)
+        run: |
+          helm-docs --chart-search-root=charts
+          if ! git diff --exit-code charts/ ; then
+            echo "::error::charts/alertly/README.md is stale. Run 'helm-docs --chart-search-root=charts' locally and commit."
+            exit 1
+          fi

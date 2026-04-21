@@ -1,0 +1,40 @@
+alertly {{ .Chart.AppVersion }} has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+1. Webhook endpoints (inside the cluster):
+
+   http://{{ include "alertly.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/v1/alertmanager/<chat_id>[:<thread_id>]
+   http://{{ include "alertly.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/v1/kubewatch/<chat_id>[:<thread_id>]
+
+   Every request must carry:
+     Authorization: Bearer $WEBHOOK_AUTH_TOKEN
+
+2. Check readiness and metrics:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "alertly.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   curl localhost:{{ .Values.service.port }}/readyz
+   curl localhost:{{ .Values.service.port }}/metrics | grep alertly_
+
+{{- if .Values.secret.create }}
+
+3. WARNING: `secret.create=true` is set. Tokens live inside the Helm release values
+   and will end up in Helm history (and anywhere your values.yaml is stored).
+   Not suitable for production — switch to `secret.create=false` and manage the
+   Secret via external-secrets/sealed-secrets/vault.
+{{- end }}
+
+{{- if not .Values.reloader.enabled }}
+
+4. Config/Secret changes do NOT trigger a restart automatically. After editing the
+   ConfigMap or Secret, either:
+     - run `kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "alertly.fullname" . }}`, or
+     - install stakater/Reloader and set `reloader.enabled=true` in values.
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+
+5. Ingress is enabled. Hosts:
+{{- range .Values.ingress.hosts }}
+   - {{ .host }}
+{{- end }}
+   Make sure your ingress controller is reachable and that {{ .Values.ingress.className | default "the default IngressClass" }} is configured.
+{{- end }}

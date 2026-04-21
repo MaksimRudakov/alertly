@@ -55,7 +55,7 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 
 `Source` is `Name() + Parse([]byte) → []notification.Notification`. Implementations register themselves in `cmd/alertly/main.go` into a `map[string]Source`; the route `POST /v1/{name}/{chats}` is generated from that map. Adding a new source = new file in `internal/source` + entry in the map. The `templateName` passed to the handler equals the source name (with fallback to `default` inside the renderer).
 
-`alertmanager`: standard webhook payload; severity from `labels.severity` (default `info`); title prefers `annotations.summary`, body prefers `annotations.description`; emits Generator/Runbook links.
+`alertmanager`: standard webhook payload; severity from `labels.severity` (default `info`); title prefers `annotations.summary`, body prefers `annotations.description`; emits a Runbook link from `annotations.runbook_url` when present (Prometheus `generatorURL` is intentionally ignored — internal Prometheus links are rarely reachable from Telegram and add noise).
 
 `kubewatch`: tries new (`eventmeta`) format then legacy flat; severity becomes `warning` for `Type=Warning` or `Reason=Failed`; fingerprint is sha256-16 of `kind|namespace|name|reason|type`.
 

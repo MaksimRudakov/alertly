@@ -42,8 +42,11 @@ func TestAlertmanagerFiring(t *testing.T) {
 	if n.Fingerprint != "abcdef1234567890" {
 		t.Errorf("fingerprint: %s", n.Fingerprint)
 	}
-	if len(n.Links) != 2 {
+	if len(n.Links) != 1 {
 		t.Errorf("links: %d", len(n.Links))
+	}
+	if n.Links[0].Title != "Runbook" {
+		t.Errorf("link title: %s", n.Links[0].Title)
 	}
 }
 
