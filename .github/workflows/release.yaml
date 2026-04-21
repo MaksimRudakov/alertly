@@ -73,12 +73,6 @@ jobs:
           for tag in $IMAGES; do
             cosign sign --yes "${tag}@${DIGEST}"
           done
-      - uses: anchore/sbom-action@v0
-        with:
-          image: ghcr.io/${{ github.repository_owner }}/alertly@${{ steps.build.outputs.digest }}
-          format: spdx-json
-          output-file: sbom.spdx.json
-          upload-release-assets: true
 
   detect-charts:
     runs-on: ubuntu-latest
