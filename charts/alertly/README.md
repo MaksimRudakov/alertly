@@ -22,6 +22,12 @@ Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Pod affinity rules. |
 | config | object | see `values.yaml` | Alertly runtime configuration. Serialized verbatim into the ConfigMap mounted at `/etc/alertly/config.yaml`. |
+| config.alertmanager | object | `{"request_timeout":"10s","url":""}` | Alertmanager connection for the silence action. Required when updates.enabled=true. Auth is supplied via env: ALERTMANAGER_AUTH_USERNAME + _PASSWORD (basic) or ALERTMANAGER_AUTH_TOKEN (bearer). See `secret.values.alertmanager*` below. |
+| config.updates | object | `{"button_ttl":"8h","chat_allowlist":[],"enabled":false,"label_cache_max":10000,"label_cache_ttl":"48h","poll_timeout":"30s","silence_durations":["1h","4h","24h"],"user_allowlist":[]}` | Interactive callbacks (Telegram long polling) and Alertmanager silence integration. Keep disabled unless on-call needs in-chat silence buttons. |
+| config.updates.button_ttl | string | `"8h"` | How long silence buttons stay active on an alert message (2h..48h). After this window the sweeper removes the keyboard and late clicks are rejected. |
+| config.updates.chat_allowlist | list | `[]` | Chats allowed to trigger silence actions. Empty list = silence disabled. |
+| config.updates.silence_durations | list | `["1h","4h","24h"]` | Silence durations presented as buttons. Each entry becomes one button. |
+| config.updates.user_allowlist | list | `[]` | Optional user allowlist within allowlisted chats. Empty = any chat member. |
 | env | object | `{"LOG_LEVEL":"info"}` | Env vars passed to the container. Keys become env names, values are quoted as strings. |
 | extraEnv | list | `[]` | Extra env vars in full k8s EnvVar form (supports `valueFrom`). |
 | extraManifests | list | `[]` | Raw manifests rendered as-is. Use for PodMonitor/ServiceMonitor, PDB, NetworkPolicy, etc. without forking the chart.  Example — PodMonitor for kube-prometheus-stack: extraManifests:   - apiVersion: monitoring.coreos.com/v1     kind: PodMonitor     metadata:       name: alertly       labels:         release: kube-prometheus-stack     spec:       selector:         matchLabels:           app.kubernetes.io/name: alertly       podMetricsEndpoints:         - port: http           path: /metrics           interval: 30s  Example — PodDisruptionBudget: extraManifests:   - apiVersion: policy/v1     kind: PodDisruptionBudget     metadata:       name: alertly     spec:       maxUnavailable: 0       selector:         matchLabels:           app.kubernetes.io/name: alertly |
@@ -48,8 +54,8 @@ Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 | resources | object | `{"limits":{"cpu":"200m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"32Mi"}}` | CPU/memory requests and limits. |
 | secret.create | bool | `true` | Create the Secret with tokens provided in `secret.values`. WARNING — NOT for production; tokens end up in Helm history. For production set `create: false` and supply the Secret via external-secrets/sealed-secrets/vault. |
 | secret.existingSecret | string | `""` | Name of an existing Secret to use when `create: false`. Defaults to release fullname when empty. |
-| secret.keys | object | `{"botToken":"TELEGRAM_BOT_TOKEN","webhookAuth":"WEBHOOK_AUTH_TOKEN"}` | Key names inside the Secret. Must match the env vars alertly reads (`TELEGRAM_BOT_TOKEN`, `WEBHOOK_AUTH_TOKEN`). |
-| secret.values | object | `{"telegramBotToken":"","webhookAuthToken":""}` | Token values used only when `create: true`. |
+| secret.keys | object | `{"alertmanagerPassword":"ALERTMANAGER_AUTH_PASSWORD","alertmanagerToken":"ALERTMANAGER_AUTH_TOKEN","alertmanagerUsername":"ALERTMANAGER_AUTH_USERNAME","botToken":"TELEGRAM_BOT_TOKEN","webhookAuth":"WEBHOOK_AUTH_TOKEN"}` | Key names inside the Secret. Must match the env vars alertly reads. Alertmanager keys are used only when `config.updates.enabled=true` AND the corresponding `secret.values.*` is set. |
+| secret.values | object | `{"alertmanagerPassword":"","alertmanagerToken":"","alertmanagerUsername":"","telegramBotToken":"","webhookAuthToken":""}` | Token values used only when `create: true`. Alertmanager fields are optional. |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsGroup":65532,"runAsNonRoot":true,"runAsUser":65532}` | Container security context. Hardened defaults — read-only rootfs, non-root, all caps dropped. |
 | service.annotations | object | `{}` | Extra annotations for the Service. |
 | service.port | int | `8080` | Service port. |

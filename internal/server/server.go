@@ -33,6 +33,8 @@ type Deps struct {
 	Readiness ReadinessTracker
 	AuthToken string
 	Registry  *prometheus.Registry
+	Keyboard  KeyboardBuilder
+	Tracker   ButtonRegistrar
 }
 
 func New(cfg config.Server, deps Deps) *Server {
@@ -57,6 +59,8 @@ func New(cfg config.Server, deps Deps) *Server {
 			readiness:    deps.Readiness,
 			maxBodyBytes: cfg.MaxBodyBytes,
 			templateName: name,
+			keyboard:     deps.Keyboard,
+			tracker:      deps.Tracker,
 		})
 		mux.Handle(fmt.Sprintf("POST /v1/%s/{chats}", name), auth(h))
 	}

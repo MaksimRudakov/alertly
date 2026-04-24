@@ -111,14 +111,21 @@ secret:
   create: true
   # -- Name of an existing Secret to use when `create: false`. Defaults to release fullname when empty.
   existingSecret: ""
-  # -- Key names inside the Secret. Must match the env vars alertly reads (`TELEGRAM_BOT_TOKEN`, `WEBHOOK_AUTH_TOKEN`).
+  # -- Key names inside the Secret. Must match the env vars alertly reads.
+  # Alertmanager keys are used only when `config.updates.enabled=true` AND the corresponding `secret.values.*` is set.
   keys:
     botToken: TELEGRAM_BOT_TOKEN
     webhookAuth: WEBHOOK_AUTH_TOKEN
-  # -- Token values used only when `create: true`.
+    alertmanagerUsername: ALERTMANAGER_AUTH_USERNAME
+    alertmanagerPassword: ALERTMANAGER_AUTH_PASSWORD
+    alertmanagerToken: ALERTMANAGER_AUTH_TOKEN
+  # -- Token values used only when `create: true`. Alertmanager fields are optional.
   values:
     telegramBotToken: ""
     webhookAuthToken: ""
+    alertmanagerUsername: ""
+    alertmanagerPassword: ""
+    alertmanagerToken: ""
 
 # -- Env vars passed to the container. Keys become env names, values are quoted as strings.
 env:
@@ -189,6 +196,33 @@ config:
   logging:
     level: "info"
     format: "json"
+
+  # -- Interactive callbacks (Telegram long polling) and Alertmanager silence integration.
+  # Keep disabled unless on-call needs in-chat silence buttons.
+  updates:
+    enabled: false
+    poll_timeout: 30s
+    # -- Chats allowed to trigger silence actions. Empty list = silence disabled.
+    chat_allowlist: []
+    # -- Optional user allowlist within allowlisted chats. Empty = any chat member.
+    user_allowlist: []
+    # -- Silence durations presented as buttons. Each entry becomes one button.
+    silence_durations:
+      - "1h"
+      - "4h"
+      - "24h"
+    label_cache_ttl: 48h
+    label_cache_max: 10000
+    # -- How long silence buttons stay active on an alert message (2h..48h).
+    # After this window the sweeper removes the keyboard and late clicks are rejected.
+    button_ttl: 8h
+
+  # -- Alertmanager connection for the silence action. Required when updates.enabled=true.
+  # Auth is supplied via env: ALERTMANAGER_AUTH_USERNAME + _PASSWORD (basic) or ALERTMANAGER_AUTH_TOKEN (bearer).
+  # See `secret.values.alertmanager*` below.
+  alertmanager:
+    url: ""
+    request_timeout: 10s
 
 # -- Raw manifests rendered as-is. Use for PodMonitor/ServiceMonitor, PDB, NetworkPolicy, etc. without forking the chart.
 #

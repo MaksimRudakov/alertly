@@ -23,6 +23,28 @@ type webhookDeps struct {
 	readiness    ReadinessTracker
 	maxBodyBytes int64
 	templateName string
+	keyboard     KeyboardBuilder
+	tracker      ButtonRegistrar
+}
+
+// ButtonRegistrar records sent alert messages so the callback handler can
+// validate and the sweeper can expire them. The handler only needs Register;
+// the full ButtonTracker also exposes Valid/Sweep for consumers.
+type ButtonRegistrar interface {
+	Register(chatID, messageID int64, fingerprint string)
+}
+
+// KeyboardBuilder returns an inline keyboard for a given chat + notification,
+// or nil if no keyboard should be attached. Always safe to return nil.
+type KeyboardBuilder interface {
+	Build(target notification.ChatTarget, n notification.Notification, sourceName string) *telegram.SendOptions
+}
+
+func (d webhookDeps) keyboardFor(target notification.ChatTarget, n notification.Notification) *telegram.SendOptions {
+	if d.keyboard == nil {
+		return nil
+	}
+	return d.keyboard.Build(target, n, d.source.Name())
 }
 
 func webhookHandler(d webhookDeps) http.HandlerFunc {
@@ -77,9 +99,17 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			}
 
 			for _, target := range targets {
-				for _, part := range parts {
+				for idx, part := range parts {
 					totalAttempts++
-					if err := d.send(ctx, target, part); err != nil {
+					var opts *telegram.SendOptions
+					// Attach inline keyboard only to the last message part, so buttons
+					// are attached once per (notification, chat) pair.
+					isLastPart := idx == len(parts)-1
+					if isLastPart {
+						opts = d.keyboardFor(target, n)
+					}
+					messageID, err := d.send(ctx, target, part, opts)
+					if err != nil {
 						totalErrors++
 						logger.Error("send failed",
 							"chat_id", target.ChatID,
@@ -91,6 +121,9 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 						continue
 					}
 					metrics.NotificationsSent.WithLabelValues(strconv.FormatInt(target.ChatID, 10), "ok").Inc()
+					if isLastPart && opts != nil && d.tracker != nil && messageID != 0 {
+						d.tracker.Register(target.ChatID, messageID, n.Fingerprint)
+					}
 				}
 			}
 		}
@@ -115,14 +148,14 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 	}
 }
 
-func (d webhookDeps) send(ctx context.Context, target notification.ChatTarget, text string) error {
-	err := d.tg.SendMessage(ctx, target.ChatID, target.ThreadID, text)
+func (d webhookDeps) send(ctx context.Context, target notification.ChatTarget, text string, opts *telegram.SendOptions) (int64, error) {
+	messageID, err := d.tg.SendMessage(ctx, target.ChatID, target.ThreadID, text, opts)
 	if err == nil {
 		d.readiness.RecordSendSuccess()
-		return nil
+		return messageID, nil
 	}
 	d.readiness.RecordSendFailure(isServerError(err))
-	return err
+	return 0, err
 }
 
 func isServerError(err error) bool {

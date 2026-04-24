@@ -76,7 +76,7 @@ func newTelegramRecorderWith(t *testing.T, override func(chatID int64) (int, str
 					return
 				}
 			}
-			_, _ = io.WriteString(w, `{"ok":true}`)
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1}}`)
 		default:
 			http.NotFound(w, req)
 		}

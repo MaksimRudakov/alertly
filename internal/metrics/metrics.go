@@ -22,6 +22,9 @@ var (
 	AuthFailures          prometheus.Counter
 	SourceParseDuration   *prometheus.HistogramVec
 	BuildInfo             *prometheus.GaugeVec
+	CallbacksReceived     *prometheus.CounterVec
+	SilencesCreated       *prometheus.CounterVec
+	UpdatesPollErrors     *prometheus.CounterVec
 )
 
 func Init() *prometheus.Registry {
@@ -80,6 +83,21 @@ func Init() *prometheus.Registry {
 			Help: "Build metadata. Always 1.",
 		}, []string{"version", "commit", "go_version"})
 
+		CallbacksReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_callbacks_received_total",
+			Help: "Number of Telegram callback_query events handled per action and outcome.",
+		}, []string{"action", "status"})
+
+		SilencesCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_silences_created_total",
+			Help: "Number of Alertmanager silences created via callback, per outcome.",
+		}, []string{"status"})
+
+		UpdatesPollErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_updates_poll_errors_total",
+			Help: "Number of errors while long-polling Telegram getUpdates, per reason.",
+		}, []string{"reason"})
+
 		registry.MustRegister(
 			NotificationsReceived,
 			NotificationsSent,
@@ -91,6 +109,9 @@ func Init() *prometheus.Registry {
 			AuthFailures,
 			SourceParseDuration,
 			BuildInfo,
+			CallbacksReceived,
+			SilencesCreated,
+			UpdatesPollErrors,
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)
