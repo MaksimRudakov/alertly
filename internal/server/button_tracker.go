@@ -101,7 +101,7 @@ func (t *ButtonTracker) Sweep() []ExpiredEntry {
 		if now.Before(e.ExpiresAt) {
 			continue
 		}
-		expired = append(expired, ExpiredEntry{ChatID: k.ChatID, MessageID: k.MessageID})
+		expired = append(expired, ExpiredEntry(k))
 		delete(t.entries, k)
 	}
 	return expired

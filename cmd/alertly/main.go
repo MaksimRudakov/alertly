@@ -81,9 +81,9 @@ func run() error {
 	readiness := server.NewReadiness()
 
 	var (
-		keyboard       server.KeyboardBuilder
-		trackerReg     server.ButtonRegistrar
-		bgWorkers      []func(context.Context)
+		keyboard   server.KeyboardBuilder
+		trackerReg server.ButtonRegistrar
+		bgWorkers  []func(context.Context)
 	)
 	if cfg.Updates.Enabled {
 		if dryRun {
