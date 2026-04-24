@@ -9,6 +9,36 @@ entries:
         - name: Container image
           url: https://github.com/MaksimRudakov/alertly/pkgs/container/alertly
     apiVersion: v2
+    appVersion: 0.1.0
+    created: "2026-04-24T09:33:33.564534641Z"
+    description: Webhook-to-Telegram bridge for Alertmanager and Kubewatch
+    digest: 989468b97855b6f8568cd7168dd149c25dd2fc7e1c044d0447d4bf2c4f5ba7b8
+    home: https://github.com/MaksimRudakov/alertly
+    keywords:
+    - alertmanager
+    - kubewatch
+    - telegram
+    - monitoring
+    - notifications
+    - prometheus
+    maintainers:
+    - name: Maksim Rudakov
+      url: https://github.com/MaksimRudakov
+    name: alertly
+    sources:
+    - https://github.com/MaksimRudakov/alertly
+    type: application
+    urls:
+    - https://github.com/MaksimRudakov/alertly/releases/download/alertly-0.1.0/alertly-0.1.0.tgz
+    version: 0.1.0
+  - annotations:
+      artifacthub.io/license: MIT
+      artifacthub.io/links: |
+        - name: Source
+          url: https://github.com/MaksimRudakov/alertly
+        - name: Container image
+          url: https://github.com/MaksimRudakov/alertly/pkgs/container/alertly
+    apiVersion: v2
     appVersion: 0.0.3
     created: "2026-04-21T12:23:26.258526684Z"
     description: Webhook-to-Telegram bridge for Alertmanager and Kubewatch
@@ -61,4 +91,4 @@ entries:
     urls:
     - https://github.com/MaksimRudakov/alertly/releases/download/alertly-0.0.1/alertly-0.0.1.tgz
     version: 0.0.1
-generated: "2026-04-21T12:23:26.258533113Z"
+generated: "2026-04-24T09:33:33.564546813Z"
