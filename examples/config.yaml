@@ -42,3 +42,27 @@ templates:
 logging:
   level: "info"
   format: "json"
+
+# Interactive callbacks (long polling) and Alertmanager silence integration.
+# Leave disabled unless on-call needs in-chat silence buttons.
+updates:
+  enabled: false
+  poll_timeout: 30s
+  # chat_allowlist: chats allowed to trigger silence actions. Empty = disabled.
+  chat_allowlist: []
+  # user_allowlist: optional. Empty = any user in an allowlisted chat.
+  user_allowlist: []
+  silence_durations: ["1h", "4h", "24h"]
+  label_cache_ttl: 48h
+  label_cache_max: 10000
+  # button_ttl: how long silence buttons stay active on an alert message.
+  # After this window the inline keyboard is removed and late clicks are rejected.
+  # Allowed range: 2h..48h.
+  button_ttl: 8h
+
+alertmanager:
+  url: ""                 # e.g. http://alertmanager.monitoring.svc:9093
+  request_timeout: 10s
+  # Auth via env (optional):
+  #   ALERTMANAGER_AUTH_USERNAME + ALERTMANAGER_AUTH_PASSWORD (basic), or
+  #   ALERTMANAGER_AUTH_TOKEN (bearer).

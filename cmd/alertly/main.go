@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MaksimRudakov/alertly/internal/alertmanager"
 	"github.com/MaksimRudakov/alertly/internal/config"
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/server"
@@ -79,6 +80,23 @@ func run() error {
 
 	readiness := server.NewReadiness()
 
+	var (
+		keyboard       server.KeyboardBuilder
+		trackerReg     server.ButtonRegistrar
+		bgWorkers      []func(context.Context)
+	)
+	if cfg.Updates.Enabled {
+		if dryRun {
+			logger.Warn("updates.enabled=true ignored under DRY_RUN")
+		} else {
+			var err error
+			keyboard, trackerReg, bgWorkers, err = setupUpdates(cfg, tgClient, logger)
+			if err != nil {
+				return fmt.Errorf("updates: %w", err)
+			}
+		}
+	}
+
 	srv := server.New(cfg.Server, server.Deps{
 		Logger:    logger,
 		Sources:   sources,
@@ -87,6 +105,8 @@ func run() error {
 		Readiness: readiness,
 		AuthToken: authToken,
 		Registry:  registry,
+		Keyboard:  keyboard,
+		Tracker:   trackerReg,
 	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -99,7 +119,76 @@ func run() error {
 		go startupCheck(rootCtx, tgClient, readiness, logger)
 	}
 
+	for _, w := range bgWorkers {
+		go w(rootCtx)
+	}
+
 	return srv.Run(rootCtx)
+}
+
+func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logger) (server.KeyboardBuilder, server.ButtonRegistrar, []func(context.Context), error) {
+	amCfg := alertmanager.Config{
+		URL:            cfg.Alertmanager.URL,
+		RequestTimeout: cfg.Alertmanager.RequestTimeout,
+		Auth: alertmanager.Auth{
+			Username: os.Getenv("ALERTMANAGER_AUTH_USERNAME"),
+			Password: os.Getenv("ALERTMANAGER_AUTH_PASSWORD"),
+			Token:    os.Getenv("ALERTMANAGER_AUTH_TOKEN"),
+		},
+	}
+	amClient := alertmanager.New(amCfg)
+
+	cache := alertmanager.NewLabelCache(cfg.Updates.LabelCacheTTL, cfg.Updates.LabelCacheMax)
+	tracker := server.NewButtonTracker(cfg.Updates.ButtonTTL)
+
+	durations := make(map[string]time.Duration, len(cfg.Updates.SilenceDurations))
+	for _, d := range cfg.Updates.SilenceDurations {
+		parsed, err := time.ParseDuration(d)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("parse silence duration %q: %w", d, err)
+		}
+		durations[d] = parsed
+	}
+
+	handler := server.NewCallbackHandler(server.CallbackDeps{
+		Logger:        logger,
+		Telegram:      tgClient,
+		AM:            amClient,
+		Cache:         cache,
+		Tracker:       tracker,
+		ChatAllowlist: cfg.Updates.ChatAllowlist,
+		UserAllowlist: cfg.Updates.UserAllowlist,
+		Durations:     durations,
+	})
+
+	keyboard := &server.AlertmanagerKeyboard{
+		Durations:     cfg.Updates.SilenceDurations,
+		ChatAllowlist: cfg.Updates.ChatAllowlist,
+		Cache:         cache,
+	}
+
+	poller := &server.UpdatesPoller{
+		Client:      tgClient,
+		Handler:     handler,
+		Logger:      logger,
+		PollTimeout: cfg.Updates.PollTimeout,
+	}
+
+	sweeper := &server.ButtonSweeper{
+		Tracker:  tracker,
+		Telegram: tgClient,
+		Logger:   logger,
+		Interval: time.Minute,
+	}
+
+	logger.Info("telegram updates enabled",
+		"chat_allowlist", len(cfg.Updates.ChatAllowlist),
+		"user_allowlist", len(cfg.Updates.UserAllowlist),
+		"durations", cfg.Updates.SilenceDurations,
+		"button_ttl", cfg.Updates.ButtonTTL,
+		"alertmanager_url", cfg.Alertmanager.URL,
+	)
+	return keyboard, tracker, []func(context.Context){poller.Run, sweeper.Run}, nil
 }
 
 func newLogger(cfg config.Logging) *slog.Logger {

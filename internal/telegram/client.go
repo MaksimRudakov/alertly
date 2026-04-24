@@ -16,8 +16,18 @@ import (
 )
 
 type Client interface {
-	SendMessage(ctx context.Context, chatID int64, threadID *int, text string) error
+	// SendMessage sends text to chatID; on success returns the Telegram message_id
+	// (0 when DryRun is on, since no network call is made).
+	SendMessage(ctx context.Context, chatID int64, threadID *int, text string, opts *SendOptions) (int64, error)
 	GetMe(ctx context.Context) error
+	GetUpdates(ctx context.Context, offset int64, timeout time.Duration) ([]Update, error)
+	AnswerCallbackQuery(ctx context.Context, callbackID, text string, showAlert bool) error
+	EditMessageText(ctx context.Context, chatID int64, messageID int64, text string, markup *InlineKeyboardMarkup) error
+	EditMessageReplyMarkup(ctx context.Context, chatID int64, messageID int64, markup *InlineKeyboardMarkup) error
+}
+
+type SendOptions struct {
+	ReplyMarkup *InlineKeyboardMarkup
 }
 
 type Config struct {
@@ -63,11 +73,12 @@ func New(cfg Config, limiter *Limiter, logger *slog.Logger) Client {
 }
 
 type sendMessagePayload struct {
-	ChatID                int64  `json:"chat_id"`
-	Text                  string `json:"text"`
-	ParseMode             string `json:"parse_mode,omitempty"`
-	DisableWebPagePreview bool   `json:"disable_web_page_preview"`
-	MessageThreadID       *int   `json:"message_thread_id,omitempty"`
+	ChatID                int64                 `json:"chat_id"`
+	Text                  string                `json:"text"`
+	ParseMode             string                `json:"parse_mode,omitempty"`
+	DisableWebPagePreview bool                  `json:"disable_web_page_preview"`
+	MessageThreadID       *int                  `json:"message_thread_id,omitempty"`
+	ReplyMarkup           *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }
 
 type apiResponse struct {
@@ -82,20 +93,20 @@ type responseParams struct {
 	RetryAfter int `json:"retry_after"`
 }
 
-func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, text string) error {
+func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, text string, opts *SendOptions) (int64, error) {
 	if c.cfg.DryRun {
 		c.log.Info("dry run: skip telegram send",
 			"chat_id", chatID,
 			"thread_id", threadIDValue(threadID),
 			"text_len", len(text),
 		)
-		return nil
+		return 0, nil
 	}
 
 	if c.limiter != nil {
 		waited, err := c.limiter.Wait(ctx, chatID)
 		if err != nil {
-			return fmt.Errorf("rate limiter wait: %w", err)
+			return 0, fmt.Errorf("rate limiter wait: %w", err)
 		}
 		if waited > 50*time.Millisecond {
 			metrics.TelegramRateLimited.WithLabelValues(metrics.ChatLabel(chatID)).Inc()
@@ -109,19 +120,42 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 		DisableWebPagePreview: true,
 		MessageThreadID:       threadID,
 	}
+	if opts != nil {
+		payload.ReplyMarkup = opts.ReplyMarkup
+	}
 
 	endpoint := c.endpoint("sendMessage")
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal sendMessage payload: %w", err)
+		return 0, fmt.Errorf("marshal sendMessage payload: %w", err)
 	}
 
-	return c.callWithRetry(ctx, endpoint, body)
+	okBody, err := c.callWithRetry(ctx, endpoint, body)
+	if err != nil {
+		return 0, err
+	}
+	return parseMessageID(okBody), nil
 }
 
 func (c *client) GetMe(ctx context.Context) error {
 	endpoint := c.endpoint("getMe")
-	return c.callWithRetry(ctx, endpoint, nil)
+	_, err := c.callWithRetry(ctx, endpoint, nil)
+	return err
+}
+
+func parseMessageID(body []byte) int64 {
+	if len(body) == 0 {
+		return 0
+	}
+	var ar struct {
+		Result struct {
+			MessageID int64 `json:"message_id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &ar); err != nil {
+		return 0
+	}
+	return ar.Result.MessageID
 }
 
 func (c *client) endpoint(method string) string {
@@ -129,18 +163,18 @@ func (c *client) endpoint(method string) string {
 	return base
 }
 
-func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte) error {
+func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < c.cfg.MaxAttempts; attempt++ {
-		err := c.callOnce(ctx, endpoint, body)
+		okBody, err := c.callOnce(ctx, endpoint, body)
 		if err == nil {
-			return nil
+			return okBody, nil
 		}
 		lastErr = err
 
 		retryable, reason := IsRetryable(err)
 		if !retryable {
-			return err
+			return nil, err
 		}
 		if attempt == c.cfg.MaxAttempts-1 {
 			break
@@ -169,14 +203,14 @@ func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte
 
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(wait):
 		}
 	}
-	return lastErr
+	return nil, lastErr
 }
 
-func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) error {
+func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
 	var req *http.Request
 	var err error
 	if body == nil {
@@ -186,14 +220,14 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) err
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 
 	start := time.Now()
 	resp, err := c.http.Do(req)
 	metrics.TelegramAPIDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
-		return fmt.Errorf("http call: %w", err)
+		return nil, fmt.Errorf("http call: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -202,9 +236,9 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) err
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var ar apiResponse
 		if err := json.Unmarshal(respBody, &ar); err == nil && !ar.OK {
-			return &APIError{StatusCode: resp.StatusCode, Body: ar.Description}
+			return nil, &APIError{StatusCode: resp.StatusCode, Body: ar.Description}
 		}
-		return nil
+		return respBody, nil
 	}
 
 	ae := &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
@@ -224,7 +258,7 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) err
 			}
 		}
 	}
-	return ae
+	return nil, ae
 }
 
 func asAPIError(err error) *APIError {

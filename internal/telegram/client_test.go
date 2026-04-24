@@ -49,7 +49,7 @@ func TestSendMessageOK(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(t, srv)
-	if err := c.SendMessage(context.Background(), 123, nil, "hi"); err != nil {
+	if _, err := c.SendMessage(context.Background(), 123, nil, "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got.ChatID != 123 || got.Text != "hi" || got.ParseMode != "HTML" || !got.DisableWebPagePreview {
@@ -67,7 +67,7 @@ func TestSendMessageThread(t *testing.T) {
 
 	thread := 42
 	c := newClient(t, srv)
-	if err := c.SendMessage(context.Background(), -100, &thread, "hi"); err != nil {
+	if _, err := c.SendMessage(context.Background(), -100, &thread, "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got.MessageThreadID == nil || *got.MessageThreadID != 42 {
@@ -91,7 +91,7 @@ func TestRetryOn429WithRetryAfter(t *testing.T) {
 	c := newClient(t, srv, func(c *Config) {
 		c.MaxBackoff = 20 * time.Millisecond
 	})
-	if err := c.SendMessage(context.Background(), 1, nil, "x"); err != nil {
+	if _, err := c.SendMessage(context.Background(), 1, nil, "x", nil); err != nil {
 		t.Fatal(err)
 	}
 	if attempts.Load() != 3 {
@@ -113,7 +113,7 @@ func TestRetryOn5xx(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(t, srv)
-	if err := c.SendMessage(context.Background(), 1, nil, "x"); err != nil {
+	if _, err := c.SendMessage(context.Background(), 1, nil, "x", nil); err != nil {
 		t.Fatal(err)
 	}
 	if attempts.Load() != 2 {
@@ -131,7 +131,7 @@ func TestNoRetryOn400(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(t, srv)
-	err := c.SendMessage(context.Background(), 1, nil, "x")
+	_, err := c.SendMessage(context.Background(), 1, nil, "x", nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -154,7 +154,7 @@ func TestRetryRespectsContext(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	err := c.SendMessage(ctx, 1, nil, "x")
+	_, err := c.SendMessage(ctx, 1, nil, "x", nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -183,7 +183,7 @@ func TestDryRunSkipsCall(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(t, srv, func(c *Config) { c.DryRun = true })
-	if err := c.SendMessage(context.Background(), 1, nil, "x"); err != nil {
+	if _, err := c.SendMessage(context.Background(), 1, nil, "x", nil); err != nil {
 		t.Fatal(err)
 	}
 	if called {
