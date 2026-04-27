@@ -79,7 +79,7 @@ jobs:
     outputs:
       has_charts: ${{ steps.check.outputs.has_charts }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - id: check
         run: |
           if compgen -G "charts/*/Chart.yaml" > /dev/null; then
