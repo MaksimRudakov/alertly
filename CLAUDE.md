@@ -67,6 +67,12 @@ Splitter (`telegram/splitter.go`) cuts on rune boundaries at `\n\n`, `\n`, then 
 
 `telegram.client` does retry with exponential backoff (`MaxAttempts`, `InitialBackoff`, `MaxBackoff`). `IsRetryable`: `429` and `5xx` are retryable; `4xx` is not; non-API errors (network) retryable. On `429`, honors `parameters.retry_after` from body or `Retry-After` header (capped to `MaxBackoff`). Rate limiter (`golang.org/x/time/rate`) enforces global + per-chat caps; `Wait` blocks before each send.
 
+Retry is **deadline-aware**: before sleeping for the next backoff, the client checks `ctx.Deadline()` (driven by the server `WriteTimeout`). If `remaining < wait + 500ms`, retry is aborted and the current error is returned immediately, with `alertly_telegram_retries_total{reason="deadline_skip"}` incremented. Rationale: avoid the failure mode where alertly sleeps past the server `WriteTimeout`, ultimately delivers the message to Telegram on a later attempt, but the caller (Alertmanager) has already given up and will retry — producing a duplicate.
+
+### Dedup (`internal/dedup`)
+
+In-process TTL cache keyed by `fingerprint|chat_id|thread_id|status`. `Reserve(key)` is the atomic check-and-insert; `Forget(key)` rolls back when no part of a multi-part message landed. Per-process state — restart re-opens the dedup window. The handler reserves once per `(notification, target)` after rendering and only forgets when *every* part for that target failed (partial successes keep the reservation so caller retries don't re-deliver the parts already in the chat). Default `enabled: true, ttl: 1h`. Metric: `alertly_dedup_skipped_total{source,chat_id,status}`. Sweeper goroutine in `cmd/alertly/main.go` runs every `min(ttl/2, 5m)`.
+
 ### Readiness model
 
 `server/readyz.go` `ReadinessTracker`:
@@ -85,7 +91,7 @@ Required env: `TELEGRAM_BOT_TOKEN`, `WEBHOOK_AUTH_TOKEN`. Optional: `ALERTLY_CON
 
 ### Metrics
 
-All in `internal/metrics`. Custom registry (no default Go process collectors except those explicitly registered: `NewGoCollector`, `NewProcessCollector`). `Init()` is idempotent via `sync.Once`. Names: `alertly_notifications_{received,sent}_total`, `alertly_telegram_{api_duration_seconds,retries_total,rate_limited_total}`, `alertly_template_render_errors_total`, `alertly_message_split_total`, `alertly_auth_failures_total`, `alertly_source_parse_duration_seconds`, `alertly_build_info`.
+All in `internal/metrics`. Custom registry (no default Go process collectors except those explicitly registered: `NewGoCollector`, `NewProcessCollector`). `Init()` is idempotent via `sync.Once`. Names: `alertly_notifications_{received,sent}_total`, `alertly_telegram_{api_duration_seconds,retries_total,rate_limited_total}` (the `retries_total` reason `deadline_skip` marks aborted retries), `alertly_template_render_errors_total`, `alertly_message_split_total`, `alertly_auth_failures_total`, `alertly_source_parse_duration_seconds`, `alertly_dedup_skipped_total`, `alertly_build_info`.
 
 ## Repo conventions
 

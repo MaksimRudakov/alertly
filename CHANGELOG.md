@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-06
+
+Reliability hardening for the Alertmanager-retry duplicate problem: when alertly successfully delivered a message to Telegram but did not ACK the webhook in time, Alertmanager would retry and the same alert was posted twice. Two complementary changes close that path. Defaults are safe — existing deployments get the fix on upgrade with no config changes required.
+
+### Added
+- **In-process deduplication** (`internal/dedup`). TTL cache keyed by `(fingerprint, chat_id, thread_id, status)`; `firing` and `resolved` are kept independent. Atomic `Reserve` / `Forget`: a reservation is rolled back only when **every** part for a target failed, so a partially-delivered multi-part alert is never re-delivered. Configurable via `dedup.enabled` (default `true`) and `dedup.ttl` (default `1h`). Per-process cache — see scaling notes in README.
+- **Deadline-aware retry** in `internal/telegram`. Before sleeping for the next exponential backoff, the client checks `ctx.Deadline()` (driven by `server.write_timeout`); if the remaining budget is less than `wait + 500ms`, the retry is aborted and the current error is returned immediately. Prevents the «delivered to Telegram on a late attempt while Alertmanager already gave up» failure mode.
+- Metrics:
+  - `alertly_dedup_skipped_total{source,chat_id,status}`
+  - new `reason` label value `deadline_skip` on `alertly_telegram_retries_total`
+- Helm chart: `config.dedup.{enabled,ttl}` exposed in `values.yaml`.
+
+### Changed
+- Helm chart `version 0.1.0 → 0.2.0`, `appVersion "0.1.0" → "0.2.0"`.
+- `replicaCount` documentation in the chart now spells out the per-pod cache constraint and recommends single-replica + PDB or path-based consistent hashing on Ingress for HA setups.
+- README rewritten: new **Deduplication** section with behaviour table and scaling considerations, metrics table extended, troubleshooting entries for duplicate deliveries and growing `deadline_skip`, mermaid diagram updated.
+
+### Fixed
+- Stale README references to chart `0.0.1` updated to current version (regression from the `v0.1.0` cut).
+
 ## [0.1.0] - 2026-04-24
 
 Phase 2b from the roadmap: in-chat silence actions for Alertmanager alerts. Off by default; existing deployments are unaffected until `updates.enabled=true` is set.
@@ -59,7 +79,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/MaksimRudakov/alertly/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/MaksimRudakov/alertly/compare/v0.0.3...v0.1.0
 [0.0.3]: https://github.com/MaksimRudakov/alertly/compare/v0.0.1...v0.0.3
 [0.0.1]: https://github.com/MaksimRudakov/alertly/releases/tag/v0.0.1

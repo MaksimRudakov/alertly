@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -157,6 +158,46 @@ func TestRetryRespectsContext(t *testing.T) {
 	_, err := c.SendMessage(ctx, 1, nil, "x", nil)
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestRetryAbortsOnInsufficientDeadlineBudget(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(429)
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":5}}`)
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv, func(c *Config) {
+		c.MaxAttempts = 5
+		c.InitialBackoff = 10 * time.Millisecond
+		c.MaxBackoff = 10 * time.Second
+	})
+
+	// Ctx deadline must be smaller than retry_after (5s) so the client must
+	// abort instead of sleeping past the deadline and (worse) succeeding on a
+	// later attempt while the caller has already given up.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.SendMessage(ctx, 1, nil, "x", nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("retry should abort fast, elapsed=%s", elapsed)
+	}
+	if attempts.Load() != 1 {
+		t.Errorf("expected 1 attempt, got %d", attempts.Load())
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.StatusCode != 429 {
+		t.Errorf("expected APIError 429, got %T %v", err, err)
 	}
 }
 

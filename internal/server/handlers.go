@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/MaksimRudakov/alertly/internal/dedup"
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/notification"
 	"github.com/MaksimRudakov/alertly/internal/source"
@@ -25,6 +26,7 @@ type webhookDeps struct {
 	templateName string
 	keyboard     KeyboardBuilder
 	tracker      ButtonRegistrar
+	dedup        *dedup.Cache
 }
 
 // ButtonRegistrar records sent alert messages so the callback handler can
@@ -99,6 +101,21 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			}
 
 			for _, target := range targets {
+				dedupKey := dedup.Key(n.Fingerprint, target.ChatID, target.ThreadID, n.Status)
+				if d.dedup.Reserve(dedupKey) {
+					metrics.DedupSkipped.WithLabelValues(d.source.Name(),
+						strconv.FormatInt(target.ChatID, 10), n.Status).Inc()
+					logger.Info("dedup: skip duplicate delivery",
+						"chat_id", target.ChatID,
+						"thread_id", threadIDValue(target.ThreadID),
+						"fingerprint", n.Fingerprint,
+						"status", n.Status,
+					)
+					continue
+				}
+
+				targetSentAny := false
+				targetFailed := false
 				for idx, part := range parts {
 					totalAttempts++
 					var opts *telegram.SendOptions
@@ -111,6 +128,7 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 					messageID, err := d.send(ctx, target, part, opts)
 					if err != nil {
 						totalErrors++
+						targetFailed = true
 						logger.Error("send failed",
 							"chat_id", target.ChatID,
 							"thread_id", threadIDValue(target.ThreadID),
@@ -120,10 +138,18 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 						metrics.NotificationsSent.WithLabelValues(strconv.FormatInt(target.ChatID, 10), "error").Inc()
 						continue
 					}
+					targetSentAny = true
 					metrics.NotificationsSent.WithLabelValues(strconv.FormatInt(target.ChatID, 10), "ok").Inc()
 					if isLastPart && opts != nil && d.tracker != nil && messageID != 0 {
 						d.tracker.Register(target.ChatID, messageID, n.Fingerprint)
 					}
+				}
+				// Roll back the reservation only when nothing was delivered: the
+				// caller's retry should be allowed to deliver it for real. If at
+				// least one part landed, we keep the reservation so the retry
+				// does not duplicate the part(s) already in the chat.
+				if !targetSentAny && targetFailed {
+					d.dedup.Forget(dedupKey)
 				}
 			}
 		}
