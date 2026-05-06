@@ -66,3 +66,12 @@ alertmanager:
   # Auth via env (optional):
   #   ALERTMANAGER_AUTH_USERNAME + ALERTMANAGER_AUTH_PASSWORD (basic), or
   #   ALERTMANAGER_AUTH_TOKEN (bearer).
+
+# In-process duplicate suppression. Drops a webhook delivery if the same
+# (fingerprint, chat_id[:thread_id], status) was already delivered within
+# `ttl`. Designed to absorb caller retries (e.g. Alertmanager re-sending a
+# group when alertly succeeded with Telegram but failed to ACK in time).
+# Per-process cache: a pod restart re-opens the dedup window.
+dedup:
+  enabled: true
+  ttl: 1h

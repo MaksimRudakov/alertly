@@ -1,6 +1,6 @@
 # alertly
 
-![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.1.0](https://img.shields.io/badge/AppVersion-0.1.0-informational?style=flat-square)
+![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.2.0](https://img.shields.io/badge/AppVersion-0.2.0-informational?style=flat-square)
 
 Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 
@@ -23,6 +23,7 @@ Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 | affinity | object | `{}` | Pod affinity rules. |
 | config | object | see `values.yaml` | Alertly runtime configuration. Serialized verbatim into the ConfigMap mounted at `/etc/alertly/config.yaml`. |
 | config.alertmanager | object | `{"request_timeout":"10s","url":""}` | Alertmanager connection for the silence action. Required when updates.enabled=true. Auth is supplied via env: ALERTMANAGER_AUTH_USERNAME + _PASSWORD (basic) or ALERTMANAGER_AUTH_TOKEN (bearer). See `secret.values.alertmanager*` below. |
+| config.dedup | object | `{"enabled":true,"ttl":"1h"}` | In-process duplicate suppression. Drops a webhook delivery if the same (fingerprint, chat_id[:thread_id], status) was already delivered within `ttl`. Designed to absorb caller retries (typically Alertmanager re-sending a group when alertly delivered to Telegram but did not ACK in time). Per-pod cache — see `replicaCount` notes for multi-replica caveats. |
 | config.updates | object | `{"button_ttl":"8h","chat_allowlist":[],"enabled":false,"label_cache_max":10000,"label_cache_ttl":"48h","poll_timeout":"30s","silence_durations":["1h","4h","24h"],"user_allowlist":[]}` | Interactive callbacks (Telegram long polling) and Alertmanager silence integration. Keep disabled unless on-call needs in-chat silence buttons. |
 | config.updates.button_ttl | string | `"8h"` | How long silence buttons stay active on an alert message (2h..48h). After this window the sweeper removes the keyboard and late clicks are rejected. |
 | config.updates.chat_allowlist | list | `[]` | Chats allowed to trigger silence actions. Empty list = silence disabled. |
@@ -50,7 +51,7 @@ Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 | probes.liveness | object | `{"failureThreshold":3,"httpGet":{"path":"/healthz","port":"http"},"initialDelaySeconds":5,"periodSeconds":10,"timeoutSeconds":2}` | Liveness probe. Matches unconditional `/healthz`. |
 | probes.readiness | object | `{"failureThreshold":3,"httpGet":{"path":"/readyz","port":"http"},"initialDelaySeconds":2,"periodSeconds":5,"timeoutSeconds":2}` | Readiness probe. `/readyz` flips unready on sustained 5xx from Telegram or during startup getMe. |
 | reloader.enabled | bool | `false` | Add `reloader.stakater.com/auto: "true"` annotation to the Deployment to auto-restart on ConfigMap/Secret content changes. Requires stakater/Reloader in the cluster. |
-| replicaCount | int | `1` | Number of alertly replicas. alertly is stateless; 1 is enough for most setups. |
+| replicaCount | int | `1` | Number of alertly replicas. alertly is stateless and lightweight; 1 is the recommended default. The in-process dedup cache (config.dedup) is per-pod — with N>1 replicas behind a Service, a webhook and its retry can land on different pods and bypass dedup. If you must run multiple replicas, route webhooks with a path-based consistent hash on your Ingress (e.g. nginx `nginx.ingress.kubernetes.io/upstream-hash-by: "$request_uri"`). |
 | resources | object | `{"limits":{"cpu":"200m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"32Mi"}}` | CPU/memory requests and limits. |
 | secret.create | bool | `true` | Create the Secret with tokens provided in `secret.values`. WARNING — NOT for production; tokens end up in Helm history. For production set `create: false` and supply the Secret via external-secrets/sealed-secrets/vault. |
 | secret.existingSecret | string | `""` | Name of an existing Secret to use when `create: false`. Defaults to release fullname when empty. |

@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/MaksimRudakov/alertly/internal/config"
+	"github.com/MaksimRudakov/alertly/internal/dedup"
 	"github.com/MaksimRudakov/alertly/internal/source"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 	tmpl "github.com/MaksimRudakov/alertly/internal/template"
@@ -35,6 +36,7 @@ type Deps struct {
 	Registry  *prometheus.Registry
 	Keyboard  KeyboardBuilder
 	Tracker   ButtonRegistrar
+	Dedup     *dedup.Cache
 }
 
 func New(cfg config.Server, deps Deps) *Server {
@@ -61,6 +63,7 @@ func New(cfg config.Server, deps Deps) *Server {
 			templateName: name,
 			keyboard:     deps.Keyboard,
 			tracker:      deps.Tracker,
+			dedup:        deps.Dedup,
 		})
 		mux.Handle(fmt.Sprintf("POST /v1/%s/{chats}", name), auth(h))
 	}

@@ -13,6 +13,8 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 - Sources: Alertmanager (v4 webhook) and Kubewatch (new + legacy payload).
 - Multiple chats and topic threads per webhook URL: `/v1/alertmanager/-100123,-100456:42`.
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
+- **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
+- **In-process deduplication** by `(fingerprint, chat, status)` with TTL — suppresses duplicate Telegram messages caused by Alertmanager re-sending a webhook it didn't get an ACK for.
 - Message splitting >4096 chars on rune boundaries, HTML-tag aware.
 - `text/template` rendering with helpers (`severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`).
 - Bearer-token webhook auth.
@@ -52,7 +54,7 @@ helm search repo alertly
 OCI (GitHub Container Registry, no `helm repo add` needed):
 
 ```bash
-helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.0.1
+helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.2.0
 ```
 
 ### Install
@@ -62,7 +64,7 @@ Quick install with tokens passed directly (fine for a lab / personal cluster —
 ```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.0.1 \
+  --version 0.2.0 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
@@ -72,7 +74,7 @@ Or from OCI:
 ```bash
 helm install alertly oci://ghcr.io/maksimrudakov/charts/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.0.1 \
+  --version 0.2.0 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
@@ -98,7 +100,7 @@ Then install referencing it:
 ```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.0.1 \
+  --version 0.2.0 \
   --set secret.create=false \
   --set secret.existingSecret=alertly-tokens \
   --set reloader.enabled=true   # optional: auto-restart on Secret/ConfigMap changes
@@ -115,15 +117,15 @@ Both the chart tarball (attached to the GitHub Release) and the OCI chart manife
 cosign verify \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/maksimrudakov/charts/alertly:0.0.1
+  ghcr.io/maksimrudakov/charts/alertly:0.2.0
 
-# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.0.1 release)
+# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.2.0 release)
 cosign verify-blob \
-  --certificate alertly-0.0.1.tgz.pem \
-  --signature alertly-0.0.1.tgz.sig \
+  --certificate alertly-0.2.0.tgz.pem \
+  --signature alertly-0.2.0.tgz.sig \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  alertly-0.0.1.tgz
+  alertly-0.2.0.tgz
 ```
 
 The container image `ghcr.io/maksimrudakov/alertly` is signed the same way.
@@ -178,6 +180,35 @@ Hot reload of config is intentionally **not** supported in-process — use [`sta
 
 Stored inline in YAML, parsed via `text/template`. Helper funcs: `severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`. A template named per source (`alertmanager`, `kubewatch`) is preferred; falls back to `default`.
 
+## Deduplication
+
+Telegram has no idempotency key, so any retry from upstream — most commonly Alertmanager re-sending a webhook because the previous response did not arrive in time — would be delivered as a fresh chat message. alertly absorbs that retry with a small in-process cache.
+
+Key: `fingerprint | chat_id | thread_id | status` (so `firing` and `resolved` of the same alert are kept separate).
+
+| Setting | Default | Notes |
+|---|---|---|
+| `dedup.enabled` | `true` | Set `false` to disable entirely. |
+| `dedup.ttl` | `1h` | Window during which a repeat delivery is suppressed. |
+
+Behaviour:
+
+- **All parts delivered** → reservation is kept → next identical webhook within TTL is dropped, returns `204 No Content`, increments `alertly_dedup_skipped_total{source,chat_id,status}`.
+- **All parts failed** → reservation is rolled back → caller's retry will be allowed through.
+- **Partial success** (long message split into several parts, some sent, some failed) → reservation is **kept**, so the caller's retry doesn't double-deliver the parts that already landed in the chat.
+
+### Scaling considerations
+
+The cache is **per-process**. With multiple alertly replicas behind a `Service`, one webhook may land on pod-A and its retry on pod-B — different caches, no dedup. Trade-offs:
+
+| Setup | When | Note |
+|---|---|---|
+| `replicaCount: 1` + PDB `maxUnavailable: 0` | **default recommendation** | alertly is stateless and lightweight; restart window is the only dedup blind-spot. |
+| `replicaCount: N` + Ingress with consistent-hash on path | when an HA policy mandates >1 replica | e.g. nginx `nginx.ingress.kubernetes.io/upstream-hash-by: "$request_uri"` — same `/v1/.../{chats}` URL always goes to the same pod. |
+| Shared cache (Redis / Valkey) | not implemented | Would only be worth it if the HA Alertmanager pair itself fans out the same webhook from both replicas. Kept out of scope until a real signal demands it. |
+
+A pod restart re-opens the dedup window for all in-flight alerts — accepted trade-off.
+
 ## Comparison
 
 | | alertly | viento-group/kubernetes-monitoring-telegram-bot | Botkube | Alertmanager `telegram_configs` |
@@ -206,7 +237,10 @@ Stored inline in YAML, parsed via `text/template`. Helper funcs: `severity_emoji
 | `alertly_message_split_total` | counter | — |
 | `alertly_auth_failures_total` | counter | — |
 | `alertly_source_parse_duration_seconds` | histogram | `source` |
+| `alertly_dedup_skipped_total` | counter | `source`, `chat_id`, `status` |
 | `alertly_build_info` | gauge | `version`, `commit`, `go_version` |
+
+`alertly_telegram_retries_total` uses these `reason` values: `429`, `5xx`, `network`, and `deadline_skip` (retry aborted because the request context would expire before the next backoff completed).
 
 ## Troubleshooting
 
@@ -217,6 +251,8 @@ Stored inline in YAML, parsed via `text/template`. Helper funcs: `severity_emoji
 | Sends fail with `429 Too Many Requests` | upstream burst > rate limit | already retried with `Retry-After`; tune `telegram.rate_limit.global_per_sec` |
 | Template render error in logs | bad `text/template` syntax in config | validate locally; `default` template must always exist |
 | Long messages dropped silently | not split? always check `alertly_message_split_total` | verify `parse_mode` is `HTML` and template doesn't emit unbalanced tags |
+| Same alert delivered to Telegram twice | multiple alertly replicas without sticky routing | run `replicaCount: 1`, or hash the request path to a pod (see [Deduplication › Scaling](#scaling-considerations)) |
+| `alertly_telegram_retries_total{reason="deadline_skip"}` growing | server `WriteTimeout` shorter than worst-case retry budget | raise `server.write_timeout` or lower `telegram.retry.max_backoff`; check Telegram `Retry-After` headers in logs |
 
 ## Architecture
 
@@ -229,9 +265,12 @@ flowchart LR
   P --> N[Notification]
   N --> R[Renderer text/template]
   R --> S[SplitMessage 4096]
-  S --> RL[per-chat + global rate limit]
+  S --> D{dedup.Reserve<br/>fp|chat|status}
+  D -- already seen --> SKIP[skip + metric]
+  D -- new --> RL[per-chat + global rate limit]
   RL --> T[Telegram Bot API]
-  T -. retry 429/5xx .-> T
+  T -. retry 429/5xx<br/>deadline-aware .-> T
+  T -- all parts failed --> FG[dedup.Forget]
 ```
 
 ## Make targets

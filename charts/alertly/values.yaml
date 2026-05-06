@@ -1,7 +1,12 @@
 ## alertly — Helm chart values
 ## See https://github.com/MaksimRudakov/alertly for documentation.
 
-# -- Number of alertly replicas. alertly is stateless; 1 is enough for most setups.
+# -- Number of alertly replicas. alertly is stateless and lightweight; 1 is the
+# recommended default. The in-process dedup cache (config.dedup) is per-pod —
+# with N>1 replicas behind a Service, a webhook and its retry can land on
+# different pods and bypass dedup. If you must run multiple replicas, route
+# webhooks with a path-based consistent hash on your Ingress (e.g. nginx
+# `nginx.ingress.kubernetes.io/upstream-hash-by: "$request_uri"`).
 replicaCount: 1
 
 image:
@@ -223,6 +228,15 @@ config:
   alertmanager:
     url: ""
     request_timeout: 10s
+
+  # -- In-process duplicate suppression. Drops a webhook delivery if the same
+  # (fingerprint, chat_id[:thread_id], status) was already delivered within
+  # `ttl`. Designed to absorb caller retries (typically Alertmanager re-sending
+  # a group when alertly delivered to Telegram but did not ACK in time).
+  # Per-pod cache — see `replicaCount` notes for multi-replica caveats.
+  dedup:
+    enabled: true
+    ttl: 1h
 
 # -- Raw manifests rendered as-is. Use for PodMonitor/ServiceMonitor, PDB, NetworkPolicy, etc. without forking the chart.
 #

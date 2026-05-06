@@ -163,6 +163,13 @@ func (c *client) endpoint(method string) string {
 	return base
 }
 
+// retrySafetyMargin is the budget we keep before ctx.Deadline so that, after
+// the retry sleep, we still have time to talk to Telegram and write a response
+// back to the caller (Alertmanager). Without this, alertly may successfully
+// deliver a message to Telegram but fail to ACK the webhook, causing the
+// caller to retry — and the message to be sent twice.
+const retrySafetyMargin = 500 * time.Millisecond
+
 func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < c.cfg.MaxAttempts; attempt++ {
@@ -180,8 +187,6 @@ func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte
 			break
 		}
 
-		metrics.TelegramRetries.WithLabelValues(reason).Inc()
-
 		wait := backoff(c.cfg.InitialBackoff, c.cfg.MaxBackoff, attempt)
 		var ae *APIError
 		if reason == "429" {
@@ -193,6 +198,24 @@ func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte
 				ae = as
 			}
 		}
+
+		if dl, ok := ctx.Deadline(); ok {
+			remaining := time.Until(dl)
+			if remaining < wait+retrySafetyMargin {
+				c.log.Warn("telegram retry aborted: insufficient deadline budget",
+					"attempt", attempt+1,
+					"reason", reason,
+					"backoff_ms", wait.Milliseconds(),
+					"remaining_ms", remaining.Milliseconds(),
+					"err", err.Error(),
+				)
+				metrics.TelegramRetries.WithLabelValues("deadline_skip").Inc()
+				return nil, err
+			}
+		}
+
+		metrics.TelegramRetries.WithLabelValues(reason).Inc()
+
 		c.log.Warn("telegram retry",
 			"attempt", attempt+1,
 			"reason", reason,

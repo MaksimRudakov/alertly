@@ -13,6 +13,7 @@ import (
 
 	"github.com/MaksimRudakov/alertly/internal/alertmanager"
 	"github.com/MaksimRudakov/alertly/internal/config"
+	"github.com/MaksimRudakov/alertly/internal/dedup"
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/server"
 	"github.com/MaksimRudakov/alertly/internal/source"
@@ -80,6 +81,12 @@ func run() error {
 
 	readiness := server.NewReadiness()
 
+	var dedupCache *dedup.Cache
+	if cfg.Dedup.Enabled {
+		dedupCache = dedup.New(cfg.Dedup.TTL)
+		logger.Info("dedup enabled", "ttl", cfg.Dedup.TTL)
+	}
+
 	var (
 		keyboard   server.KeyboardBuilder
 		trackerReg server.ButtonRegistrar
@@ -107,6 +114,7 @@ func run() error {
 		Registry:  registry,
 		Keyboard:  keyboard,
 		Tracker:   trackerReg,
+		Dedup:     dedupCache,
 	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -121,6 +129,10 @@ func run() error {
 
 	for _, w := range bgWorkers {
 		go w(rootCtx)
+	}
+
+	if dedupCache != nil {
+		go dedupCache.Run(rootCtx, 0)
 	}
 
 	return srv.Run(rootCtx)

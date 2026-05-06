@@ -25,6 +25,7 @@ var (
 	CallbacksReceived     *prometheus.CounterVec
 	SilencesCreated       *prometheus.CounterVec
 	UpdatesPollErrors     *prometheus.CounterVec
+	DedupSkipped          *prometheus.CounterVec
 )
 
 func Init() *prometheus.Registry {
@@ -98,6 +99,11 @@ func Init() *prometheus.Registry {
 			Help: "Number of errors while long-polling Telegram getUpdates, per reason.",
 		}, []string{"reason"})
 
+		DedupSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_dedup_skipped_total",
+			Help: "Number of notification deliveries suppressed by the in-process dedup cache (caller retry of an already-delivered notification).",
+		}, []string{"source", "chat_id", "status"})
+
 		registry.MustRegister(
 			NotificationsReceived,
 			NotificationsSent,
@@ -112,6 +118,7 @@ func Init() *prometheus.Registry {
 			CallbacksReceived,
 			SilencesCreated,
 			UpdatesPollErrors,
+			DedupSkipped,
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)

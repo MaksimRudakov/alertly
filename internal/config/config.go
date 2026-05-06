@@ -22,6 +22,7 @@ type Config struct {
 	Logging      Logging           `yaml:"logging"`
 	Updates      Updates           `yaml:"updates"`
 	Alertmanager Alertmanager      `yaml:"alertmanager"`
+	Dedup        Dedup             `yaml:"dedup"`
 }
 
 type Server struct {
@@ -80,6 +81,15 @@ type Alertmanager struct {
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 }
 
+// Dedup controls the in-process duplicate-suppression cache. A retry from the
+// upstream caller (e.g. Alertmanager when the previous webhook ACK timed out)
+// is dropped when the same (fingerprint, chat target, status) was delivered
+// within TTL. Cache is per-process; it is rebuilt after a restart.
+type Dedup struct {
+	Enabled bool          `yaml:"enabled"`
+	TTL     time.Duration `yaml:"ttl"`
+}
+
 func Default() Config {
 	return Config{
 		Server: Server{
@@ -123,6 +133,10 @@ func Default() Config {
 		Alertmanager: Alertmanager{
 			URL:            "",
 			RequestTimeout: 10 * time.Second,
+		},
+		Dedup: Dedup{
+			Enabled: true,
+			TTL:     time.Hour,
 		},
 	}
 }
@@ -222,6 +236,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("updates.button_ttl must be within %s..%s, got %s",
 				ButtonTTLMin, ButtonTTLMax, c.Updates.ButtonTTL)
 		}
+	}
+	if c.Dedup.Enabled && c.Dedup.TTL <= 0 {
+		return errors.New("dedup.ttl must be > 0 when dedup.enabled is true")
 	}
 	return nil
 }
