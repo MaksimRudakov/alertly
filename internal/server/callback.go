@@ -15,7 +15,11 @@ import (
 
 const (
 	CallbackActionSilence = "s"
+	CallbackActionUndo    = "u"
 	callbackFieldSep      = "|"
+	// callbackFieldNone fills the unused third field of undo callback data so
+	// every callback keeps the same 3-field wire format.
+	callbackFieldNone = "-"
 )
 
 // CallbackDeps carries dependencies for handling Telegram callback_query events.
@@ -28,6 +32,10 @@ type CallbackDeps struct {
 	ChatAllowlist []int64
 	UserAllowlist []int64
 	Durations     map[string]time.Duration // "1h" -> 1h, pre-validated at startup
+	// SilenceMatchers limits which labels become matchers (empty = all).
+	SilenceMatchers []string
+	// UndoTracker holds messages carrying a live ↩️ Undo button. nil disables undo.
+	UndoTracker *ButtonTracker
 }
 
 // CallbackHandler processes a single callback_query: validates allowlists,
@@ -64,7 +72,7 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 	}
 	logger = logger.With("action", action, "fingerprint", fingerprint, "duration", durationKey)
 
-	if action != CallbackActionSilence {
+	if action != CallbackActionSilence && action != CallbackActionUndo {
 		metrics.CallbacksReceived.WithLabelValues(action, "invalid").Inc()
 		logger.Warn("callback: unknown action")
 		h.answer(ctx, cq.ID, "⚠️ Unknown action.", true)
@@ -89,6 +97,12 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 		metrics.CallbacksReceived.WithLabelValues(action, "auth_failed").Inc()
 		logger.Warn("callback: user not in allowlist")
 		h.answer(ctx, cq.ID, "⛔ You are not authorized to silence alerts.", true)
+		return
+	}
+
+	if action == CallbackActionUndo {
+		// For undo the second field carries the silence ID, not a fingerprint.
+		h.handleUndo(ctx, cq, fingerprint, logger)
 		return
 	}
 
@@ -124,9 +138,20 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 		return
 	}
 
+	matchers := alertmanager.MatchersFromLabels(labels, h.deps.SilenceMatchers)
+	if len(matchers) == 0 {
+		// None of the configured silence_matchers labels exist on this alert; a
+		// zero-matcher silence would match everything — refuse.
+		metrics.CallbacksReceived.WithLabelValues(action, "invalid").Inc()
+		logger.Warn("callback: no matchers after silence_matchers filter",
+			"silence_matchers", h.deps.SilenceMatchers)
+		h.answer(ctx, cq.ID, "⚠️ Alert has none of the configured silence labels.", true)
+		return
+	}
+
 	now := time.Now().UTC()
 	silenceID, err := h.deps.AM.CreateSilence(ctx, alertmanager.SilenceRequest{
-		Matchers:  alertmanager.MatchersFromLabels(labels),
+		Matchers:  matchers,
 		StartsAt:  now,
 		EndsAt:    now.Add(duration),
 		CreatedBy: silenceCreatedBy(cq.From),
@@ -144,11 +169,57 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 	metrics.SilencesCreated.WithLabelValues("ok").Inc()
 	logger.Info("silence created", "silence_id", silenceID, "until", now.Add(duration))
 
-	// Strip buttons so nobody silences twice from the same alert.
-	h.stripKeyboard(ctx, cq)
+	// Silence buttons must go away so nobody silences twice; when undo is
+	// enabled they are replaced with a short-lived ↩️ Undo button instead.
 	h.deps.Tracker.Consume(chatID, cq.Message.MessageID)
+	if h.deps.UndoTracker != nil && len(BuildCallbackData(CallbackActionUndo, silenceID, callbackFieldNone)) <= maxCallbackDataBytes {
+		h.deps.UndoTracker.Register(chatID, cq.Message.MessageID, silenceID)
+		if err := h.deps.Telegram.EditMessageReplyMarkup(ctx, chatID, cq.Message.MessageID, undoKeyboard(silenceID)); err != nil {
+			h.deps.Logger.Warn("callback: attach undo keyboard failed", "err", err)
+		}
+	} else {
+		h.stripKeyboard(ctx, cq)
+	}
 	until := now.Add(duration).Format("15:04 MST")
 	h.answer(ctx, cq.ID, fmt.Sprintf("🔇 Silenced %s until %s (id: %s)", durationKey, until, silenceID), false)
+}
+
+// handleUndo deletes the silence referenced by the undo button. The undo
+// window is enforced by UndoTracker (strict: restart or expiry rejects).
+func (h *CallbackHandler) handleUndo(ctx context.Context, cq *telegram.CallbackQuery, silenceID string, logger *slog.Logger) {
+	chatID := cq.Message.Chat.ID
+	if h.deps.UndoTracker == nil || !h.deps.UndoTracker.Valid(chatID, cq.Message.MessageID) {
+		metrics.CallbacksReceived.WithLabelValues(CallbackActionUndo, "expired").Inc()
+		logger.Warn("callback: undo window expired or unknown message")
+		h.stripKeyboard(ctx, cq)
+		h.answer(ctx, cq.ID, "⏰ Undo window expired; remove the silence in Alertmanager if needed.", true)
+		return
+	}
+
+	if err := h.deps.AM.DeleteSilence(ctx, silenceID); err != nil {
+		metrics.CallbacksReceived.WithLabelValues(CallbackActionUndo, "am_error").Inc()
+		metrics.SilencesDeleted.WithLabelValues("error").Inc()
+		logger.Error("callback: delete silence failed", "silence_id", silenceID, "err", err)
+		h.answer(ctx, cq.ID, "⚠️ Failed to remove the silence in Alertmanager.", true)
+		return
+	}
+
+	metrics.CallbacksReceived.WithLabelValues(CallbackActionUndo, "ok").Inc()
+	metrics.SilencesDeleted.WithLabelValues("ok").Inc()
+	logger.Info("silence removed via undo", "silence_id", silenceID)
+
+	h.deps.UndoTracker.Consume(chatID, cq.Message.MessageID)
+	h.stripKeyboard(ctx, cq)
+	h.answer(ctx, cq.ID, "🔊 Silence removed — alert will notify again.", false)
+}
+
+func undoKeyboard(silenceID string) *telegram.InlineKeyboardMarkup {
+	return &telegram.InlineKeyboardMarkup{
+		InlineKeyboard: [][]telegram.InlineKeyboardButton{{{
+			Text:         "↩️ Undo silence",
+			CallbackData: BuildCallbackData(CallbackActionUndo, silenceID, callbackFieldNone),
+		}}},
+	}
 }
 
 func (h *CallbackHandler) resolveLabels(ctx context.Context, fingerprint string) (map[string]string, error) {

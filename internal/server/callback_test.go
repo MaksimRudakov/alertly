@@ -124,6 +124,8 @@ type fakeAM struct {
 	silenceErr    error
 	silenceID     string
 	createdReqs   []alertmanager.SilenceRequest
+	deleteErr     error
+	deletedIDs    []string
 	mu            sync.Mutex
 	getAlertCalls int
 }
@@ -153,6 +155,13 @@ func (f *fakeAM) CreateSilence(_ context.Context, req alertmanager.SilenceReques
 		return "silence-1", nil
 	}
 	return f.silenceID, nil
+}
+
+func (f *fakeAM) DeleteSilence(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletedIDs = append(f.deletedIDs, id)
+	return f.deleteErr
 }
 
 // --- tests -----------------------------------------------------------------
@@ -374,5 +383,145 @@ func TestSilenceCreatedBy(t *testing.T) {
 	}
 	if got := silenceCreatedBy(telegram.User{ID: 5}); got != "telegram:5" {
 		t.Errorf("without username: %q", got)
+	}
+}
+
+// --- silence_matchers + undo ------------------------------------------------
+
+func newUndoHandler(tg *fakeTG, am *fakeAM, matchers []string) (*CallbackHandler, *ButtonTracker) {
+	tracker := NewButtonTracker(time.Hour)
+	tracker.Register(-100, 42, "any")
+	undo := NewButtonTracker(5 * time.Minute)
+	h := NewCallbackHandler(CallbackDeps{
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Telegram:        tg,
+		AM:              am,
+		Cache:           alertmanager.NewLabelCache(time.Hour, 10),
+		Tracker:         tracker,
+		ChatAllowlist:   []int64{-100},
+		Durations:       map[string]time.Duration{"1h": time.Hour},
+		SilenceMatchers: matchers,
+		UndoTracker:     undo,
+	})
+	return h, undo
+}
+
+func TestCallback_SilenceMatchersFilter(t *testing.T) {
+	tg := &fakeTG{}
+	am := &fakeAM{labels: map[string]map[string]string{
+		"fp1": {"alertname": "X", "namespace": "prod", "pod": "api-123", "severity": "warning"},
+	}}
+	h, _ := newUndoHandler(tg, am, []string{"alertname", "namespace"})
+
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
+
+	if len(am.createdReqs) != 1 {
+		t.Fatalf("expected 1 silence, got %d", len(am.createdReqs))
+	}
+	got := map[string]string{}
+	for _, m := range am.createdReqs[0].Matchers {
+		got[m.Name] = m.Value
+	}
+	if len(got) != 2 || got["alertname"] != "X" || got["namespace"] != "prod" {
+		t.Errorf("matchers filtered wrong: %+v", am.createdReqs[0].Matchers)
+	}
+}
+
+func TestCallback_SilenceMatchersNoneMatch_Refused(t *testing.T) {
+	tg := &fakeTG{}
+	am := &fakeAM{labels: map[string]map[string]string{
+		"fp1": {"severity": "warning"},
+	}}
+	h, _ := newUndoHandler(tg, am, []string{"alertname"})
+
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
+
+	if len(am.createdReqs) != 0 {
+		t.Fatalf("zero-matcher silence must be refused, got %d requests", len(am.createdReqs))
+	}
+	if len(tg.answers) != 1 || !tg.answers[0].ShowAlert {
+		t.Errorf("expected alert answer, got %+v", tg.answers)
+	}
+}
+
+func TestCallback_UndoFlow(t *testing.T) {
+	tg := &fakeTG{}
+	am := &fakeAM{
+		labels:    map[string]map[string]string{"fp1": {"alertname": "X"}},
+		silenceID: "sil-42",
+	}
+	h, undo := newUndoHandler(tg, am, nil)
+
+	// 1. Silence: keyboard must be replaced with an Undo button, not stripped.
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
+	if len(tg.editedMarkups) != 1 {
+		t.Fatalf("expected 1 markup edit, got %d", len(tg.editedMarkups))
+	}
+	m := tg.editedMarkups[0].Markup
+	if m == nil || len(m.InlineKeyboard) != 1 || len(m.InlineKeyboard[0]) != 1 {
+		t.Fatalf("expected undo keyboard, got %+v", m)
+	}
+	undoData := m.InlineKeyboard[0][0].CallbackData
+	if undoData != "u|sil-42|-" {
+		t.Fatalf("undo callback data: %q", undoData)
+	}
+	if !undo.Valid(-100, 42) {
+		t.Fatal("undo tracker should hold the message")
+	}
+
+	// 2. Undo press: silence deleted, keyboard stripped, tracker consumed.
+	h.Handle(context.Background(), mkCallback(undoData, -100, 1))
+	if len(am.deletedIDs) != 1 || am.deletedIDs[0] != "sil-42" {
+		t.Fatalf("expected DeleteSilence(sil-42), got %v", am.deletedIDs)
+	}
+	last := tg.editedMarkups[len(tg.editedMarkups)-1]
+	if last.Markup != nil {
+		t.Errorf("keyboard should be stripped after undo, got %+v", last.Markup)
+	}
+	if undo.Valid(-100, 42) {
+		t.Error("undo tracker entry should be consumed")
+	}
+
+	// 3. Second undo press: window is gone, no second delete.
+	h.Handle(context.Background(), mkCallback(undoData, -100, 1))
+	if len(am.deletedIDs) != 1 {
+		t.Errorf("expected no second delete, got %v", am.deletedIDs)
+	}
+}
+
+func TestCallback_UndoExpiredWindow(t *testing.T) {
+	tg := &fakeTG{}
+	am := &fakeAM{}
+	tracker := NewButtonTracker(time.Hour)
+	h := NewCallbackHandler(CallbackDeps{
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Telegram:      tg,
+		AM:            am,
+		Cache:         alertmanager.NewLabelCache(time.Hour, 10),
+		Tracker:       tracker,
+		ChatAllowlist: []int64{-100},
+		Durations:     map[string]time.Duration{"1h": time.Hour},
+		UndoTracker:   NewButtonTracker(5 * time.Minute), // nothing registered
+	})
+
+	h.Handle(context.Background(), mkCallback("u|sil-1|-", -100, 1))
+
+	if len(am.deletedIDs) != 0 {
+		t.Errorf("expired undo must not delete, got %v", am.deletedIDs)
+	}
+	if len(tg.answers) != 1 || !tg.answers[0].ShowAlert {
+		t.Errorf("expected alert answer, got %+v", tg.answers)
+	}
+}
+
+func TestCallback_UndoDisabled_KeyboardStripped(t *testing.T) {
+	tg := &fakeTG{}
+	am := &fakeAM{labels: map[string]map[string]string{"fp1": {"alertname": "X"}}}
+	h := newHandler(tg, am, alertmanager.NewLabelCache(time.Hour, 10), []int64{-100}, nil)
+
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
+
+	if len(tg.editedMarkups) != 1 || tg.editedMarkups[0].Markup != nil {
+		t.Errorf("with undo disabled the keyboard must be stripped, got %+v", tg.editedMarkups)
 	}
 }

@@ -36,6 +36,7 @@ func (a Auth) apply(req *http.Request) {
 type Client interface {
 	GetAlertLabels(ctx context.Context, fingerprint string) (map[string]string, error)
 	CreateSilence(ctx context.Context, req SilenceRequest) (string, error)
+	DeleteSilence(ctx context.Context, silenceID string) error
 }
 
 type Matcher struct {
@@ -227,6 +228,33 @@ func (c *client) CreateSilence(ctx context.Context, sreq SilenceRequest) (string
 	return sr.SilenceID, nil
 }
 
+func (c *client) DeleteSilence(ctx context.Context, silenceID string) error {
+	if silenceID == "" {
+		return errors.New("silence id is empty")
+	}
+	u, err := url.Parse(c.cfg.URL)
+	if err != nil {
+		return fmt.Errorf("parse alertmanager url: %w", err)
+	}
+	u.Path = joinPath(u.Path, "/api/v2/silence/"+url.PathEscape(silenceID))
+
+	status, body, err := c.doWithRetry(ctx, 1<<16, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
+	if err != nil {
+		return fmt.Errorf("alertmanager delete silence: %w", err)
+	}
+	if status < 200 || status >= 300 {
+		return &APIError{StatusCode: status, Body: string(body)}
+	}
+	return nil
+}
+
 func joinPath(base, rel string) string {
 	if base == "" {
 		return rel
@@ -244,11 +272,24 @@ func joinPath(base, rel string) string {
 }
 
 // MatchersFromLabels builds exact-match matchers from a label map.
-// All labels are included; callers should pre-filter if narrower matchers are desired.
-func MatchersFromLabels(labels map[string]string) []Matcher {
-	out := make([]Matcher, 0, len(labels))
-	for k, v := range labels {
-		out = append(out, Matcher{Name: k, Value: v, IsRegex: false, IsEqual: true})
+// With an empty filter every label is included (narrowest possible silence);
+// otherwise only the listed label names are used — a broader silence that also
+// catches sibling alerts sharing those labels. Filtered names absent from the
+// alert are skipped, so the result can be empty: callers must refuse to create
+// a silence with zero matchers (it would match everything).
+func MatchersFromLabels(labels map[string]string, filter []string) []Matcher {
+	if len(filter) == 0 {
+		out := make([]Matcher, 0, len(labels))
+		for k, v := range labels {
+			out = append(out, Matcher{Name: k, Value: v, IsRegex: false, IsEqual: true})
+		}
+		return out
+	}
+	out := make([]Matcher, 0, len(filter))
+	for _, name := range filter {
+		if v, ok := labels[name]; ok {
+			out = append(out, Matcher{Name: name, Value: v, IsRegex: false, IsEqual: true})
+		}
 	}
 	return out
 }

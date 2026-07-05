@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+- **Generic webhook source** (`POST /v1/generic/{chats}`): alertly's own JSON contract (`title`, `body`, `severity`, `status`, `fingerprint`, `labels`, `annotations`, `links`, `timestamp`; single object or array up to 100). Any tool that can POST JSON — GitLab CI, Jira automation, ArgoCD notifications webhook, scripts — gets dedup, splitting, threads and rate limiting. Fingerprint is content-hashed when absent, so sender retries are absorbed. README documents the contract with GitLab/ArgoCD/Jira examples.
+- **↩️ Undo button**: after a silence is created the keyboard is replaced with a short-lived Undo button that deletes the silence via `DELETE /api/v2/silence/{id}`. Window is `updates.undo_window` (default `5m`, `0` disables, max `1h`); state is in-memory with the same strict expire-on-restart policy. Metrics: `alertly_silences_deleted_total{status}`, gauge `alertly_undo_tracker_entries`.
+- **Configurable silence scope** `updates.silence_matchers`: empty (default) keeps the current behaviour — matchers from all labels, narrowest silence; listing labels (e.g. `[alertname, namespace]`) creates a broader silence covering sibling alerts. A press producing zero matchers is refused.
+
 ## [0.3.0] - 2026-07-05
 
 Reliability, observability and supply-chain hardening pass. No config changes required; all new chart features are opt-in.

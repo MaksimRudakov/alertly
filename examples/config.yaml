@@ -59,6 +59,15 @@ updates:
   # After this window the inline keyboard is removed and late clicks are rejected.
   # Allowed range: 2h..48h.
   button_ttl: 8h
+  # silence_matchers: which alert labels become silence matchers.
+  # Empty (default) = ALL labels: the narrowest silence, only this exact alert
+  # instance. Listing labels (e.g. [alertname, namespace]) creates a broader
+  # silence that also covers sibling alerts sharing those labels — use with care.
+  silence_matchers: []
+  # undo_window: how long the "Undo silence" button stays after a silence is
+  # created (pressing it deletes the silence via the AM API). 0 disables undo.
+  # Allowed range: 0..1h.
+  undo_window: 5m
 
 alertmanager:
   url: ""                 # e.g. http://alertmanager.monitoring.svc:9093

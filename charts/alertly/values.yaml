@@ -255,6 +255,13 @@ config:
     # -- How long silence buttons stay active on an alert message (2h..48h).
     # After this window the sweeper removes the keyboard and late clicks are rejected.
     button_ttl: 8h
+    # -- Which alert labels become silence matchers. Empty = ALL labels
+    # (narrowest silence, only this exact alert instance). Listing labels,
+    # e.g. [alertname, namespace], silences sibling alerts too — use with care.
+    silence_matchers: []
+    # -- How long the "Undo silence" button stays after a silence is created
+    # (press deletes the silence via the AM API). 0 disables undo. Range 0..1h.
+    undo_window: 5m
 
   # -- Alertmanager connection for the silence action. Required when updates.enabled=true.
   # Auth is supplied via env: ALERTMANAGER_AUTH_USERNAME + _PASSWORD (basic) or ALERTMANAGER_AUTH_TOKEN (bearer).

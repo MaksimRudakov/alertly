@@ -24,6 +24,7 @@ var (
 	BuildInfo             *prometheus.GaugeVec
 	CallbacksReceived     *prometheus.CounterVec
 	SilencesCreated       *prometheus.CounterVec
+	SilencesDeleted       *prometheus.CounterVec
 	UpdatesPollErrors     *prometheus.CounterVec
 	DedupSkipped          *prometheus.CounterVec
 	LabelCacheLookups     *prometheus.CounterVec
@@ -95,6 +96,11 @@ func Init() *prometheus.Registry {
 			Help: "Number of Alertmanager silences created via callback, per outcome.",
 		}, []string{"status"})
 
+		SilencesDeleted = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_silences_deleted_total",
+			Help: "Number of Alertmanager silences deleted via the Undo button, per outcome.",
+		}, []string{"status"})
+
 		UpdatesPollErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_updates_poll_errors_total",
 			Help: "Number of errors while long-polling Telegram getUpdates, per reason.",
@@ -123,6 +129,7 @@ func Init() *prometheus.Registry {
 			BuildInfo,
 			CallbacksReceived,
 			SilencesCreated,
+			SilencesDeleted,
 			UpdatesPollErrors,
 			DedupSkipped,
 			LabelCacheLookups,

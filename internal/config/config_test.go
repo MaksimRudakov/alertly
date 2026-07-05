@@ -133,3 +133,31 @@ func TestDryRun(t *testing.T) {
 		t.Error("dry run false expected")
 	}
 }
+
+func TestValidate_SilenceMatchersAndUndoWindow(t *testing.T) {
+	base := func() Config {
+		c := Default()
+		c.Updates.Enabled = true
+		c.Alertmanager.URL = "http://am:9093"
+		return c
+	}
+
+	c := base()
+	c.Updates.SilenceMatchers = []string{"alertname", " "}
+	if err := c.Validate(); err == nil {
+		t.Error("empty matcher name must fail validation")
+	}
+
+	c = base()
+	c.Updates.UndoWindow = 2 * time.Hour
+	if err := c.Validate(); err == nil {
+		t.Error("undo_window above max must fail validation")
+	}
+
+	c = base()
+	c.Updates.SilenceMatchers = []string{"alertname", "namespace"}
+	c.Updates.UndoWindow = 0 // undo disabled is valid
+	if err := c.Validate(); err != nil {
+		t.Errorf("valid config rejected: %v", err)
+	}
+}

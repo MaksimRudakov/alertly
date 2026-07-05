@@ -10,8 +10,8 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 
 ## Features
 
-- Sources: Alertmanager (v4 webhook) and Kubewatch (new + legacy payload).
-- **Interactive Silence buttons** on firing Alertmanager alerts: inline keyboard via Telegram long polling, silences created through the Alertmanager API v2, chat/user allowlists, TTL-limited button window. Off by default (`updates.enabled`).
+- Sources: Alertmanager (v4 webhook), Kubewatch (new + legacy payload), and a **generic JSON contract** for anything else (GitLab CI, Jira automation, ArgoCD notifications, scripts).
+- **Interactive Silence buttons** on firing Alertmanager alerts: inline keyboard via Telegram long polling, silences created through the Alertmanager API v2 (matcher scope configurable), **↩️ Undo** window after each silence, chat/user allowlists, TTL-limited buttons. Off by default (`updates.enabled`).
 - Multiple chats and topic threads per webhook URL: `/v1/alertmanager/-100123,-100456:42`.
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
 - **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
@@ -156,6 +156,7 @@ Full list of values with defaults and descriptions: [`charts/alertly/README.md`]
 |---|---|---|---|
 | `POST` | `/v1/alertmanager/{chats}` | Bearer | Alertmanager webhook |
 | `POST` | `/v1/kubewatch/{chats}` | Bearer | Kubewatch webhook |
+| `POST` | `/v1/generic/{chats}` | Bearer | Generic JSON events ([contract](#generic-webhook-source)) |
 | `GET`  | `/healthz` | — | Liveness |
 | `GET`  | `/readyz`  | — | Readiness (periodic `getMe` probe + recent send health) |
 | `GET`  | `/metrics` | — | Prometheus metrics |
@@ -187,7 +188,7 @@ Stored inline in YAML, parsed via `text/template`. Helper funcs: `severity_emoji
 
 ## Interactive silence buttons
 
-Firing Alertmanager alerts can carry a row of `🔇 Silence 1h/4h/24h` inline buttons. Pressing one creates a silence via `POST /api/v2/silences` with exact-match matchers built from all alert labels. Delivery of button presses uses Telegram **long polling** (`getUpdates`) — no inbound endpoint or Ingress changes.
+Firing Alertmanager alerts can carry a row of `🔇 Silence 1h/4h/24h` inline buttons. Pressing one creates a silence via `POST /api/v2/silences`; the keyboard is then replaced with a short-lived **↩️ Undo** button that deletes the silence again. Delivery of button presses uses Telegram **long polling** (`getUpdates`) — no inbound endpoint or Ingress changes.
 
 ```yaml
 updates:
@@ -196,16 +197,77 @@ updates:
   user_allowlist: []                 # optional: restrict to specific user IDs
   silence_durations: ["1h", "4h", "24h"]
   button_ttl: 8h                     # buttons expire and are stripped after this
+  silence_matchers: []               # [] = all labels (exact instance); e.g. [alertname, namespace] for broader scope
+  undo_window: 5m                    # ↩️ Undo lifetime after a silence; 0 disables
 alertmanager:
   url: http://alertmanager.monitoring.svc:9093
 ```
 
+Matcher scope: with empty `silence_matchers` the silence is built from **all** alert labels — it matches only that exact alert instance. Listing labels (e.g. `[alertname, namespace]`) produces a broader silence that also covers sibling alerts sharing those labels; if an alert has none of the listed labels, the press is refused (a zero-matcher silence would match everything).
+
 Operational notes:
 
-- Buttons expire after `button_ttl`; a background sweeper strips expired keyboards, late clicks are rejected.
-- Button state is in-memory: after a pod restart old buttons are rejected with «Silence window expired» (strict policy — no accidental silences from stale state).
+- Buttons expire after `button_ttl`; a background sweeper strips expired keyboards, late clicks are rejected. The Undo button has its own shorter sweeper.
+- Button and undo state is in-memory: after a pod restart old buttons are rejected with «window expired» (strict policy — no accidental silences/deletes from stale state).
 - Callback processing is bounded (15s per press) and transient Alertmanager errors are retried; delivery of callbacks is at-least-once, so in a narrow crash window a silence can be created twice — duplicates are harmless (identical matchers).
 - Labels are resolved via the AM API with an in-process fallback cache, so resolving works even when AM has already dropped the alert.
+
+## Generic webhook source
+
+`POST /v1/generic/{chats}` accepts alertly's own JSON contract — a single event object or an array (max 100). Any tool that can POST JSON gets the full pipeline: dedup, message splitting, threads, rate limiting.
+
+```json
+{
+  "title":       "Deploy failed",                  // required
+  "body":        "pipeline #123 on main",          // optional
+  "severity":    "critical",                       // optional, default "info" (drives severity_emoji)
+  "status":      "firing",                         // optional, default "event"; part of the dedup key
+  "fingerprint": "deploy-shop-123",                // optional; content hash when absent
+  "labels":      {"project": "shop"},              // optional
+  "annotations": {},                               // optional
+  "links":       [{"title": "Pipeline", "url": "https://gitlab/..."}],
+  "timestamp":   "2026-07-05T12:00:00Z"            // optional, RFC3339
+}
+```
+
+Dedup: identical payloads (same computed or provided fingerprint + status) within `dedup.ttl` are suppressed — send an explicit `fingerprint` when several distinct events may render identical text.
+
+Sender examples:
+
+```bash
+# GitLab CI (after_script on failure)
+curl -sf -X POST "$ALERTLY_URL/v1/generic/-1001234567890" \
+  -H "Authorization: Bearer $WEBHOOK_AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"title\":\"Pipeline failed: $CI_PROJECT_PATH\",\"severity\":\"critical\",\"fingerprint\":\"ci-$CI_PIPELINE_ID\",\"links\":[{\"title\":\"Pipeline\",\"url\":\"$CI_PIPELINE_URL\"}]}"
+```
+
+```yaml
+# ArgoCD notifications: webhook service + template
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+data:
+  service.webhook.alertly: |
+    url: http://alertly.monitoring-system.svc:8080/v1/generic/-1001234567890
+    headers:
+      - name: Authorization
+        value: Bearer $webhook-auth-token
+  template.app-degraded: |
+    webhook:
+      alertly:
+        method: POST
+        body: |
+          {
+            "title": "ArgoCD: {{.app.metadata.name}} is {{.app.status.health.status}}",
+            "severity": "warning",
+            "status": "firing",
+            "fingerprint": "argocd-{{.app.metadata.name}}-degraded",
+            "links": [{"title": "Open in ArgoCD", "url": "{{.context.argocdUrl}}/applications/{{.app.metadata.name}}"}]
+          }
+```
+
+Jira Automation: add a «Send web request» action with the same JSON body and the `Authorization: Bearer …` header.
 
 ## Deduplication
 
@@ -244,6 +306,7 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | Maintained | yes | dead since 2021 | yes | yes |
 | Alertmanager source | yes | yes | yes (alerts via webhook) | native |
 | Kubewatch source | yes | yes | n/a | n/a |
+| Generic JSON source | yes | no | via plugins | n/a |
 | Multiple chats per webhook URL | yes | yes | n/a | per-receiver |
 | Topic threads | yes | no | n/a | yes |
 | Message splitting >4096 | yes | no (truncates) | n/a | no (errors) |
@@ -267,10 +330,12 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | `alertly_dedup_skipped_total` | counter | `source`, `chat_id`, `status` |
 | `alertly_callbacks_received_total` | counter | `action`, `status` |
 | `alertly_silences_created_total` | counter | `status` |
+| `alertly_silences_deleted_total` | counter | `status` |
 | `alertly_updates_poll_errors_total` | counter | `reason` |
 | `alertly_label_cache_lookups_total` | counter | `result` (`hit`/`miss`) |
 | `alertly_dedup_cache_entries` | gauge | — |
 | `alertly_button_tracker_entries` | gauge | — |
+| `alertly_undo_tracker_entries` | gauge | — |
 | `alertly_label_cache_entries` | gauge | — |
 | `alertly_build_info` | gauge | `version`, `commit`, `go_version` |
 
