@@ -1,0 +1,36 @@
+{{- if .Values.metrics.serviceMonitor.enabled -}}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") -}}
+{{- fail "metrics.serviceMonitor.enabled=true, but the cluster does not expose monitoring.coreos.com/v1. Install the Prometheus Operator CRDs (e.g. kube-prometheus-stack) first, or pass `--api-versions monitoring.coreos.com/v1` when templating offline." -}}
+{{- end -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "alertly.fullname" . }}
+  labels:
+    {{- include "alertly.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "alertly.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      {{- with .Values.metrics.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- if .Values.metrics.serviceMonitor.honorLabels }}
+      honorLabels: true
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

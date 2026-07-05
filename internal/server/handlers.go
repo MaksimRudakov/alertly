@@ -107,7 +107,7 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 						strconv.FormatInt(target.ChatID, 10), n.Status).Inc()
 					logger.Info("dedup: skip duplicate delivery",
 						"chat_id", target.ChatID,
-						"thread_id", threadIDValue(target.ThreadID),
+						"thread_id", telegram.ThreadIDValue(target.ThreadID),
 						"fingerprint", n.Fingerprint,
 						"status", n.Status,
 					)
@@ -131,7 +131,7 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 						targetFailed = true
 						logger.Error("send failed",
 							"chat_id", target.ChatID,
-							"thread_id", threadIDValue(target.ThreadID),
+							"thread_id", telegram.ThreadIDValue(target.ThreadID),
 							"fingerprint", n.Fingerprint,
 							"err", err,
 						)
@@ -184,17 +184,18 @@ func (d webhookDeps) send(ctx context.Context, target notification.ChatTarget, t
 	return 0, err
 }
 
+// isServerError classifies a send failure for readiness accounting: Telegram
+// 5xx and network-level errors count as server-side degradation; 4xx (bad
+// request, chat not found) and caller-driven cancellations do not. 429 is
+// deliberately excluded — flipping readiness on rate limiting would drop the
+// pod from the Service and turn backpressure into an outage.
 func isServerError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var ae *telegram.APIError
 	if errors.As(err, &ae) {
 		return ae.Status() >= 500
 	}
-	return false
-}
-
-func threadIDValue(p *int) any {
-	if p == nil {
-		return nil
-	}
-	return *p
+	return true
 }

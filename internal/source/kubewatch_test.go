@@ -50,6 +50,27 @@ func TestKubewatchFingerprintStable(t *testing.T) {
 	}
 }
 
+// Same object+reason but different message must not share a fingerprint —
+// otherwise dedup collapses distinct events (e.g. CrashLoopBackOff with
+// changing restart counts) for the whole TTL.
+func TestKubewatchFingerprintIncludesMessage(t *testing.T) {
+	payload := func(msg string) []byte {
+		return []byte(`{"eventmeta":{"kind":"Pod","name":"api","namespace":"prod","reason":"BackOff","type":"Warning"},"text":"` + msg + `","time":"2026-01-01T00:00:00Z"}`)
+	}
+	a, err := NewKubewatch().Parse(payload("restart count 1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := NewKubewatch().Parse(payload("restart count 2"))
+	if a[0].Fingerprint == b[0].Fingerprint {
+		t.Error("different messages should produce different fingerprints")
+	}
+	c, _ := NewKubewatch().Parse(payload("restart count 1"))
+	if a[0].Fingerprint != c[0].Fingerprint {
+		t.Error("identical payloads (caller retry) should share a fingerprint")
+	}
+}
+
 func TestKubewatchInvalid(t *testing.T) {
 	if _, err := NewKubewatch().Parse([]byte("not json")); err == nil {
 		t.Error("expected error")

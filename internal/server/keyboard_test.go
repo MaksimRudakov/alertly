@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,38 @@ func TestKeyboard_FiringAllowlistedChat(t *testing.T) {
 	}
 	if _, ok := cache.Get("fp"); !ok {
 		t.Error("labels should be cached on keyboard build")
+	}
+}
+
+func TestKeyboard_SkipsOversizedCallbackData(t *testing.T) {
+	longFP := strings.Repeat("f", 80) // "s|<80 chars>|1h" > 64 bytes
+	k := &AlertmanagerKeyboard{
+		Durations:     []string{"1h"},
+		ChatAllowlist: []int64{-100},
+		Cache:         alertmanager.NewLabelCache(time.Hour, 10),
+	}
+	opts := k.Build(
+		notification.ChatTarget{ChatID: -100},
+		notification.Notification{Status: "firing", Fingerprint: longFP, Labels: map[string]string{"a": "1"}},
+		"alertmanager",
+	)
+	if opts != nil {
+		t.Error("keyboard with only oversized callback_data buttons should be dropped entirely")
+	}
+
+	// A normal fingerprint on the same builder still yields buttons.
+	opts = k.Build(
+		notification.ChatTarget{ChatID: -100},
+		notification.Notification{Status: "firing", Fingerprint: "fp", Labels: map[string]string{"a": "1"}},
+		"alertmanager",
+	)
+	if opts == nil {
+		t.Fatal("expected keyboard for normal fingerprint")
+	}
+	for _, b := range opts.ReplyMarkup.InlineKeyboard[0] {
+		if len(b.CallbackData) > maxCallbackDataBytes {
+			t.Errorf("callback_data exceeds limit: %d bytes", len(b.CallbackData))
+		}
 	}
 }
 

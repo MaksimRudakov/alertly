@@ -14,7 +14,7 @@ GO          ?= go
 GOFLAGS     ?=
 DOCKER_TAG  ?= alertly:dev
 
-.PHONY: all build test test-cover lint fmt run docker clean tidy
+.PHONY: all build test test-cover lint fmt run docker clean tidy vuln
 
 all: lint test build
 
@@ -36,6 +36,14 @@ lint:
 	  echo "golangci-lint not installed; running go vet + staticcheck fallback"; \
 	  $(GO) vet ./...; \
 	  command -v staticcheck >/dev/null && staticcheck ./... || true; \
+	fi
+
+vuln:
+	@if command -v govulncheck >/dev/null; then \
+	  govulncheck ./...; \
+	else \
+	  echo "govulncheck not installed; running via 'go run'"; \
+	  $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...; \
 	fi
 
 fmt:

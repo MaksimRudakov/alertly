@@ -91,6 +91,60 @@ func New(cfg Config) Client {
 	}
 }
 
+// Transient AM failures (restart, rollout, brief network blip) should not turn
+// a button press into a user-visible error, so both calls retry a couple of
+// times. A duplicate silence caused by "created but 5xx on response" is
+// harmless: identical matchers suppress the same alerts.
+const (
+	retryAttempts = 3
+	retryBackoff  = 300 * time.Millisecond
+)
+
+func retryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= 500
+}
+
+// doWithRetry executes build() up to retryAttempts times, retrying network
+// errors, 429 and 5xx with linear backoff. The request is rebuilt per attempt
+// because its body reader is consumed. Returns the status code and the
+// (bounded) response body of the final attempt.
+func (c *client) doWithRetry(ctx context.Context, maxBody int64, build func() (*http.Request, error)) (int, []byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < retryAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return 0, nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * retryBackoff):
+			}
+		}
+
+		req, err := build()
+		if err != nil {
+			return 0, nil, err
+		}
+		c.cfg.Auth.apply(req)
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				return 0, nil, err
+			}
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+		_ = resp.Body.Close()
+
+		if retryableStatus(resp.StatusCode) && attempt < retryAttempts-1 {
+			lastErr = &APIError{StatusCode: resp.StatusCode, Body: string(body)}
+			continue
+		}
+		return resp.StatusCode, body, nil
+	}
+	return 0, nil, lastErr
+}
+
 func (c *client) GetAlertLabels(ctx context.Context, fingerprint string) (map[string]string, error) {
 	if fingerprint == "" {
 		return nil, errors.New("fingerprint is empty")
@@ -108,22 +162,19 @@ func (c *client) GetAlertLabels(ctx context.Context, fingerprint string) (map[st
 	q.Set("inhibited", "true")
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	c.cfg.Auth.apply(req)
-
-	resp, err := c.http.Do(req)
+	status, body, err := c.doWithRetry(ctx, 1<<20, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("alertmanager get alerts: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(body)}
+	if status < 200 || status >= 300 {
+		return nil, &APIError{StatusCode: status, Body: string(body)}
 	}
 
 	var alerts []alert
@@ -150,23 +201,20 @@ func (c *client) CreateSilence(ctx context.Context, sreq SilenceRequest) (string
 		return "", fmt.Errorf("marshal silence: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	c.cfg.Auth.apply(req)
-
-	resp, err := c.http.Do(req)
+	status, respBody, err := c.doWithRetry(ctx, 1<<16, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
 	if err != nil {
 		return "", fmt.Errorf("alertmanager create silence: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
+	if status < 200 || status >= 300 {
+		return "", &APIError{StatusCode: status, Body: string(respBody)}
 	}
 
 	var sr silenceResponse

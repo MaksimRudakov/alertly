@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,10 +43,14 @@ type Config struct {
 }
 
 type client struct {
-	cfg     Config
-	http    *http.Client
-	limiter *Limiter
-	log     *slog.Logger
+	cfg  Config
+	http *http.Client
+	// pollHTTP has no client-level timeout: long-poll duration is bounded by the
+	// request context in GetUpdates. A dedicated client keeps its keep-alive
+	// connection to Telegram warm between polls.
+	pollHTTP *http.Client
+	limiter  *Limiter
+	log      *slog.Logger
 }
 
 func New(cfg Config, limiter *Limiter, logger *slog.Logger) Client {
@@ -65,10 +70,11 @@ func New(cfg Config, limiter *Limiter, logger *slog.Logger) Client {
 		cfg.MaxBackoff = 60 * time.Second
 	}
 	return &client{
-		cfg:     cfg,
-		http:    &http.Client{Timeout: cfg.RequestTimeout},
-		limiter: limiter,
-		log:     logger,
+		cfg:      cfg,
+		http:     &http.Client{Timeout: cfg.RequestTimeout},
+		pollHTTP: &http.Client{},
+		limiter:  limiter,
+		log:      logger,
 	}
 }
 
@@ -97,7 +103,7 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 	if c.cfg.DryRun {
 		c.log.Info("dry run: skip telegram send",
 			"chat_id", chatID,
-			"thread_id", threadIDValue(threadID),
+			"thread_id", ThreadIDValue(threadID),
 			"text_len", len(text),
 		)
 		return 0, nil
@@ -190,7 +196,8 @@ func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte
 		wait := backoff(c.cfg.InitialBackoff, c.cfg.MaxBackoff, attempt)
 		var ae *APIError
 		if reason == "429" {
-			if as := asAPIError(err); as != nil && as.RetryAfter > 0 {
+			var as *APIError
+			if errors.As(err, &as) && as.RetryAfter > 0 {
 				wait = as.RetryAfter
 				if wait > c.cfg.MaxBackoff {
 					wait = c.cfg.MaxBackoff
@@ -284,22 +291,9 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) ([]
 	return nil, ae
 }
 
-func asAPIError(err error) *APIError {
-	for e := err; e != nil; {
-		if ae, ok := e.(*APIError); ok {
-			return ae
-		}
-		type unwrapper interface{ Unwrap() error }
-		if u, ok := e.(unwrapper); ok {
-			e = u.Unwrap()
-			continue
-		}
-		return nil
-	}
-	return nil
-}
-
-func threadIDValue(p *int) any {
+// ThreadIDValue renders an optional topic thread ID for structured logging:
+// nil stays nil instead of a pointer address.
+func ThreadIDValue(p *int) any {
 	if p == nil {
 		return nil
 	}

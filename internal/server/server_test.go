@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -406,7 +408,9 @@ func TestIsServerError(t *testing.T) {
 		want bool
 	}{
 		{"nil error returns false", nil, false},
-		{"non-api error returns false", context.Canceled, false},
+		{"canceled context returns false", context.Canceled, false},
+		{"deadline exceeded returns false", fmt.Errorf("send: %w", context.DeadlineExceeded), false},
+		{"network error returns true", errors.New("dial tcp: connection refused"), true},
 		{"api 400 returns false", &telegram.APIError{StatusCode: 400}, false},
 		{"api 429 returns false", &telegram.APIError{StatusCode: 429}, false},
 		{"api 500 returns true", &telegram.APIError{StatusCode: 500}, true},

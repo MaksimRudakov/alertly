@@ -75,7 +75,10 @@ func kwToNotification(meta kwEventMeta, text string, ts time.Time) notification.
 	}
 
 	title := buildKWTitle(meta)
-	fp := fingerprint(meta.Kind, meta.Namespace, meta.Name, meta.Reason, meta.Type)
+	// Include the message body: dedup must absorb caller retries (identical
+	// payload), not collapse distinct events on the same object — e.g. two
+	// CrashLoopBackOff messages with different restart counts within the TTL.
+	fp := fingerprint(meta.Kind, meta.Namespace, meta.Name, meta.Reason, meta.Type, body)
 
 	return notification.Notification{
 		Source:      "kubewatch",

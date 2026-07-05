@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -17,6 +18,9 @@ type UpdatesPoller struct {
 	Handler     *CallbackHandler
 	Logger      *slog.Logger
 	PollTimeout time.Duration
+	// HandleTimeout bounds processing of a single callback_query; zero means
+	// callbackHandleTimeout.
+	HandleTimeout time.Duration
 
 	offset int64
 }
@@ -24,6 +28,10 @@ type UpdatesPoller struct {
 func (p *UpdatesPoller) Run(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	handleTimeout := p.HandleTimeout
+	if handleTimeout <= 0 {
+		handleTimeout = callbackHandleTimeout
+	}
 
 	p.Logger.Info("telegram updates poller started", "poll_timeout", p.PollTimeout)
 	defer p.Logger.Info("telegram updates poller stopped")
@@ -44,7 +52,8 @@ func (p *UpdatesPoller) Run(ctx context.Context) {
 				return
 			}
 			reason := "network"
-			if ae, ok := asTelegramAPIError(err); ok {
+			var ae *telegram.APIError
+			if errors.As(err, &ae) {
 				reason = "api_" + httpStatusClass(ae.Status())
 			}
 			metrics.UpdatesPollErrors.WithLabelValues(reason).Inc()
@@ -71,30 +80,22 @@ func (p *UpdatesPoller) Run(ctx context.Context) {
 			if u.CallbackQuery == nil {
 				continue
 			}
-			// Process each callback in the foreground; AM calls are quick and
-			// serialisation gives predictable ordering without extra locking.
-			p.Handler.Handle(ctx, u.CallbackQuery)
+			// Process each callback in the foreground; serialisation gives
+			// predictable ordering without extra locking. The per-callback
+			// timeout keeps one stuck AM/Telegram call from stalling the loop:
+			// without it, EditMessageReplyMarkup would retry with backoff for
+			// minutes on an undeadlined context.
+			hctx, hcancel := context.WithTimeout(ctx, handleTimeout)
+			p.Handler.Handle(hctx, u.CallbackQuery)
+			hcancel()
 		}
 	}
 }
 
-func asTelegramAPIError(err error) (*telegram.APIError, bool) {
-	if err == nil {
-		return nil, false
-	}
-	type unwrapper interface{ Unwrap() error }
-	for e := err; e != nil; {
-		if ae, ok := e.(*telegram.APIError); ok {
-			return ae, true
-		}
-		u, ok := e.(unwrapper)
-		if !ok {
-			return nil, false
-		}
-		e = u.Unwrap()
-	}
-	return nil, false
-}
+// callbackHandleTimeout bounds the processing of a single callback_query.
+// Telegram expects answerCallbackQuery within ~15s; anything slower already
+// shows a spinner to the user, so there is no point retrying past this budget.
+const callbackHandleTimeout = 15 * time.Second
 
 func httpStatusClass(code int) string {
 	switch {

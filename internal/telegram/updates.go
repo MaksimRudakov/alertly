@@ -75,6 +75,13 @@ type editMessageReplyMarkupRequest struct {
 }
 
 func (c *client) GetUpdates(ctx context.Context, offset int64, timeout time.Duration) ([]Update, error) {
+	// pollHTTP carries no client-level timeout; make sure the request cannot
+	// hang forever even when the caller passed an unbounded context.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout+c.cfg.RequestTimeout)
+		defer cancel()
+	}
 	req := getUpdatesRequest{
 		Offset:         offset,
 		Timeout:        int(timeout.Seconds()),
@@ -92,9 +99,7 @@ func (c *client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Use a dedicated HTTP client so long-poll timeout does not clash with RequestTimeout.
-	pollClient := &http.Client{Timeout: timeout + c.cfg.RequestTimeout}
-	resp, err := pollClient.Do(httpReq)
+	resp, err := c.pollHTTP.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("getUpdates: %w", err)
 	}
