@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -69,11 +70,21 @@ type Updates struct {
 	// buttons on an alert message. After this window the sweeper removes the
 	// inline keyboard and late clicks are rejected. Allowed range: 2h..48h.
 	ButtonTTL time.Duration `yaml:"button_ttl"`
+	// SilenceMatchers limits which alert labels become silence matchers.
+	// Empty (default) = all labels: the narrowest silence, matching only this
+	// exact alert instance. Listing e.g. [alertname, namespace] creates a
+	// broader silence that also covers sibling alerts sharing those labels.
+	SilenceMatchers []string `yaml:"silence_matchers"`
+	// UndoWindow is how long the ↩️ Undo button stays on the message after a
+	// silence is created (silence is deleted via the AM API on press).
+	// 0 disables undo. Allowed range: 0..1h.
+	UndoWindow time.Duration `yaml:"undo_window"`
 }
 
 const (
-	ButtonTTLMin = 2 * time.Hour
-	ButtonTTLMax = 48 * time.Hour
+	ButtonTTLMin  = 2 * time.Hour
+	ButtonTTLMax  = 48 * time.Hour
+	UndoWindowMax = time.Hour
 )
 
 type Alertmanager struct {
@@ -129,6 +140,8 @@ func Default() Config {
 			LabelCacheTTL:    48 * time.Hour,
 			LabelCacheMax:    10000,
 			ButtonTTL:        8 * time.Hour,
+			SilenceMatchers:  nil,
+			UndoWindow:       5 * time.Minute,
 		},
 		Alertmanager: Alertmanager{
 			URL:            "",
@@ -235,6 +248,15 @@ func (c Config) Validate() error {
 		if c.Updates.ButtonTTL < ButtonTTLMin || c.Updates.ButtonTTL > ButtonTTLMax {
 			return fmt.Errorf("updates.button_ttl must be within %s..%s, got %s",
 				ButtonTTLMin, ButtonTTLMax, c.Updates.ButtonTTL)
+		}
+		for _, m := range c.Updates.SilenceMatchers {
+			if strings.TrimSpace(m) == "" {
+				return errors.New("updates.silence_matchers must not contain empty label names")
+			}
+		}
+		if c.Updates.UndoWindow < 0 || c.Updates.UndoWindow > UndoWindowMax {
+			return fmt.Errorf("updates.undo_window must be within 0..%s, got %s",
+				UndoWindowMax, c.Updates.UndoWindow)
 		}
 	}
 	if c.Dedup.Enabled && c.Dedup.TTL <= 0 {

@@ -142,7 +142,7 @@ func TestAuth_Basic(t *testing.T) {
 }
 
 func TestMatchersFromLabels(t *testing.T) {
-	m := MatchersFromLabels(map[string]string{"a": "1", "b": "2"})
+	m := MatchersFromLabels(map[string]string{"a": "1", "b": "2"}, nil)
 	if len(m) != 2 {
 		t.Fatalf("expected 2 matchers, got %d", len(m))
 	}
@@ -150,6 +150,57 @@ func TestMatchersFromLabels(t *testing.T) {
 		if !x.IsEqual || x.IsRegex {
 			t.Errorf("matcher flags wrong: %+v", x)
 		}
+	}
+}
+
+func TestMatchersFromLabels_Filter(t *testing.T) {
+	labels := map[string]string{"alertname": "X", "namespace": "prod", "pod": "api-1"}
+
+	m := MatchersFromLabels(labels, []string{"alertname", "namespace"})
+	if len(m) != 2 {
+		t.Fatalf("expected 2 filtered matchers, got %+v", m)
+	}
+
+	// Filter entries absent from the alert are skipped, possibly down to zero.
+	m = MatchersFromLabels(labels, []string{"team"})
+	if len(m) != 0 {
+		t.Errorf("expected 0 matchers for absent label, got %+v", m)
+	}
+}
+
+func TestDeleteSilence(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
+	if err := c.DeleteSilence(context.Background(), "sil-42"); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/api/v2/silence/sil-42" {
+		t.Errorf("got %s %s", gotMethod, gotPath)
+	}
+
+	if err := c.DeleteSilence(context.Background(), ""); err == nil {
+		t.Error("empty silence id must error")
+	}
+}
+
+func TestDeleteSilence_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		_, _ = io.WriteString(w, `silence not found`)
+	}))
+	defer srv.Close()
+
+	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
+	err := c.DeleteSilence(context.Background(), "gone")
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.StatusCode != 404 {
+		t.Errorf("expected APIError(404), got %v", err)
 	}
 }
 

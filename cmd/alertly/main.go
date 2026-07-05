@@ -78,6 +78,7 @@ func run() error {
 	sources := map[string]source.Source{
 		"alertmanager": source.NewAlertmanager(),
 		"kubewatch":    source.NewKubewatch(),
+		"generic":      source.NewGeneric(),
 	}
 
 	readiness := server.NewReadiness()
@@ -194,15 +195,24 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		durations[d] = parsed
 	}
 
+	var undoTracker *server.ButtonTracker
+	if cfg.Updates.UndoWindow > 0 {
+		undoTracker = server.NewButtonTracker(cfg.Updates.UndoWindow)
+		metrics.RegisterSizeGauge("alertly_undo_tracker_entries",
+			"Current number of messages with an active Undo button.", undoTracker.Len)
+	}
+
 	handler := server.NewCallbackHandler(server.CallbackDeps{
-		Logger:        logger,
-		Telegram:      tgClient,
-		AM:            amClient,
-		Cache:         cache,
-		Tracker:       tracker,
-		ChatAllowlist: cfg.Updates.ChatAllowlist,
-		UserAllowlist: cfg.Updates.UserAllowlist,
-		Durations:     durations,
+		Logger:          logger,
+		Telegram:        tgClient,
+		AM:              amClient,
+		Cache:           cache,
+		Tracker:         tracker,
+		ChatAllowlist:   cfg.Updates.ChatAllowlist,
+		UserAllowlist:   cfg.Updates.UserAllowlist,
+		Durations:       durations,
+		SilenceMatchers: cfg.Updates.SilenceMatchers,
+		UndoTracker:     undoTracker,
 	})
 
 	keyboard := &server.AlertmanagerKeyboard{
@@ -226,14 +236,27 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		Interval: time.Minute,
 	}
 
+	workers := []func(context.Context){poller.Run, sweeper.Run}
+	if undoTracker != nil {
+		undoSweeper := &server.ButtonSweeper{
+			Tracker:  undoTracker,
+			Telegram: tgClient,
+			Logger:   logger,
+			Interval: 30 * time.Second,
+		}
+		workers = append(workers, undoSweeper.Run)
+	}
+
 	logger.Info("telegram updates enabled",
 		"chat_allowlist", len(cfg.Updates.ChatAllowlist),
 		"user_allowlist", len(cfg.Updates.UserAllowlist),
 		"durations", cfg.Updates.SilenceDurations,
 		"button_ttl", cfg.Updates.ButtonTTL,
+		"silence_matchers", cfg.Updates.SilenceMatchers,
+		"undo_window", cfg.Updates.UndoWindow,
 		"alertmanager_url", cfg.Alertmanager.URL,
 	)
-	return keyboard, tracker, []func(context.Context){poller.Run, sweeper.Run}, nil
+	return keyboard, tracker, workers, nil
 }
 
 func newLogger(cfg config.Logging) *slog.Logger {
