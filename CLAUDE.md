@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Go: `1.25` (toolchain `go1.26.2`)
 - Single binary entry: `cmd/alertly`
 
-README references a `SPEC.md` that does not exist in the tree — treat README + `examples/config.yaml` + `TODO.md` as the source of truth for current scope. `TODO.md` lists Phase 2 items (dedup, inline buttons, generic source, label routing, async queue, Markdown, two-way chat) that are intentionally out of MVP.
+Treat README + `examples/config.yaml` + `TODO.md` as the source of truth for current scope. Dedup and interactive silence buttons (Phase 2b) are shipped; `TODO.md` lists the remaining Phase 2/3 items (generic source, label routing, async queue, Markdown, chat-ops commands) that are intentionally deferred until a real signal demands them.
 
 ## Common commands
 
@@ -57,7 +57,7 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 
 `alertmanager`: standard webhook payload; severity from `labels.severity` (default `info`); title prefers `annotations.summary`, body prefers `annotations.description`; emits a Runbook link from `annotations.runbook_url` when present (Prometheus `generatorURL` is intentionally ignored — internal Prometheus links are rarely reachable from Telegram and add noise).
 
-`kubewatch`: tries new (`eventmeta`) format then legacy flat; severity becomes `warning` for `Type=Warning` or `Reason=Failed`; fingerprint is sha256-16 of `kind|namespace|name|reason|type`.
+`kubewatch`: tries new (`eventmeta`) format then legacy flat; severity becomes `warning` for `Type=Warning` or `Reason=Failed`; fingerprint is sha256-16 of `kind|namespace|name|reason|type|message` — the message is included deliberately so dedup only absorbs identical redeliveries, not distinct events on the same object.
 
 ### Notification → Telegram
 
@@ -73,15 +73,28 @@ Retry is **deadline-aware**: before sleeping for the next backoff, the client ch
 
 In-process TTL cache keyed by `fingerprint|chat_id|thread_id|status`. `Reserve(key)` is the atomic check-and-insert; `Forget(key)` rolls back when no part of a multi-part message landed. Per-process state — restart re-opens the dedup window. The handler reserves once per `(notification, target)` after rendering and only forgets when *every* part for that target failed (partial successes keep the reservation so caller retries don't re-deliver the parts already in the chat). Default `enabled: true, ttl: 1h`. Metric: `alertly_dedup_skipped_total{source,chat_id,status}`. Sweeper goroutine in `cmd/alertly/main.go` runs every `min(ttl/2, 5m)`.
 
+### Interactive silence buttons (`updates.*`)
+
+Off by default; enabled via `updates.enabled` + `alertmanager.url`. Moving parts (all wired in `setupUpdates` in `main.go`):
+- `server.AlertmanagerKeyboard` (keyboard.go) attaches a `🔇 Silence <dur>` row to firing alertmanager notifications in allowlisted chats; buttons whose `callback_data` would exceed Telegram's 64-byte limit are skipped (a keyboard with no valid buttons is dropped).
+- `server.UpdatesPoller` (updates.go) long-polls `getUpdates` (`allowed_updates=["callback_query"]`) through a dedicated keep-alive HTTP client; each callback is handled synchronously under a 15s `HandleTimeout` so a stuck AM/Telegram call cannot stall the loop. Offset is in-memory → delivery is at-least-once.
+- `server.CallbackHandler` (callback.go) validates chat/user allowlists and the `ButtonTracker` window, resolves labels (AM API → `alertmanager.LabelCache` fallback, hit/miss metered), creates the silence, strips the keyboard. `answer()` runs on a context detached from the handle budget so the user always gets feedback.
+- `server.ButtonTracker` + sweeper (button_tracker.go): in-memory TTL registry of messages with live buttons; restart invalidates old buttons (strict policy).
+- `internal/alertmanager.client` retries network errors, 429 and 5xx up to 3 attempts with linear backoff (300ms step); 4xx is terminal. A duplicate silence from a retried POST is harmless (identical matchers).
+- `alertmanager.LabelCache` is a TTL+FIFO map with O(1) eviction (`container/list`).
+
 ### Readiness model
 
 `server/readyz.go` `ReadinessTracker`:
 - starts unready with reason `startup: telegram getMe pending`;
-- `startupCheck` in `main.go` calls `tg.GetMe` with exponential backoff and flips to ready on success;
-- runtime: `RecordSendSuccess` resets a failure counter and re-arms ready; `RecordSendFailure(serverError=true)` increments and flips to unready after `readyzFailureWindow=10` consecutive 5xx;
-- 4xx send failures do NOT degrade readiness (they're treated as caller/data problems).
+- `telegramHealthLoop` in `main.go` probes `tg.GetMe` continuously: exponential backoff until the first success (flips ready), then every minute; 3 consecutive probe failures flip unready. Probe success only re-arms probe-driven unreadiness — it never overrides the send-failure window below;
+- runtime: `RecordSendSuccess` resets a failure counter and re-arms ready; `RecordSendFailure(serverError=true)` increments and flips to unready after `readyzFailureWindow=10` consecutive failures. Server errors = Telegram 5xx **and** network-level errors; 4xx and 429 do NOT degrade readiness (caller/data problems and backpressure respectively).
 
 `/healthz` is unconditional 200; `/readyz` returns 503 with JSON reason when not ready.
+
+### Shutdown
+
+`run()` tracks every background worker (health loop, updates poller, button sweeper, dedup sweeper) in a `sync.WaitGroup`; after `srv.Run` returns it cancels the root context and waits up to `server.shutdown_timeout` for them to finish, so an in-flight silence callback completes its ack/edit instead of being cut off.
 
 ### Configuration
 
@@ -91,7 +104,7 @@ Required env: `TELEGRAM_BOT_TOKEN`, `WEBHOOK_AUTH_TOKEN`. Optional: `ALERTLY_CON
 
 ### Metrics
 
-All in `internal/metrics`. Custom registry (no default Go process collectors except those explicitly registered: `NewGoCollector`, `NewProcessCollector`). `Init()` is idempotent via `sync.Once`. Names: `alertly_notifications_{received,sent}_total`, `alertly_telegram_{api_duration_seconds,retries_total,rate_limited_total}` (the `retries_total` reason `deadline_skip` marks aborted retries), `alertly_template_render_errors_total`, `alertly_message_split_total`, `alertly_auth_failures_total`, `alertly_source_parse_duration_seconds`, `alertly_dedup_skipped_total`, `alertly_build_info`.
+All in `internal/metrics`. Custom registry (no default Go process collectors except those explicitly registered: `NewGoCollector`, `NewProcessCollector`). `Init()` is idempotent via `sync.Once`. Names: `alertly_notifications_{received,sent}_total`, `alertly_telegram_{api_duration_seconds,retries_total,rate_limited_total}` (the `retries_total` reason `deadline_skip` marks aborted retries), `alertly_template_render_errors_total`, `alertly_message_split_total`, `alertly_auth_failures_total`, `alertly_source_parse_duration_seconds`, `alertly_dedup_skipped_total`, `alertly_callbacks_received_total`, `alertly_silences_created_total`, `alertly_updates_poll_errors_total`, `alertly_label_cache_lookups_total`, `alertly_build_info`. Cache sizes are exposed as on-scrape gauges (`alertly_{dedup_cache,button_tracker,label_cache}_entries`) registered from `main.go` via `metrics.RegisterSizeGauge`.
 
 ## Repo conventions
 

@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-05
+
+Reliability, observability and supply-chain hardening pass. No config changes required; all new chart features are opt-in.
+
+### Added
+- **Continuous Telegram health probe**: readiness is now driven by a periodic `getMe` (every 60s after startup, 3 consecutive failures flip unready), so a Telegram outage is detected even with no webhook traffic. Network-level send errors now count toward the readiness failure window (429 still does not, deliberately).
+- **Alertmanager client retry**: `GET /api/v2/alerts` and `POST /api/v2/silences` retry network errors, 429 and 5xx (3 attempts, linear backoff) — a transient AM blip no longer fails a button press.
+- Metrics: `alertly_label_cache_lookups_total{result}` and on-scrape size gauges `alertly_dedup_cache_entries`, `alertly_button_tracker_entries`, `alertly_label_cache_entries`.
+- Helm chart: native `podDisruptionBudget.{enabled,minAvailable,maxUnavailable}` and `metrics.serviceMonitor.*` (interval, scrapeTimeout, labels, relabelings) — both off by default, previously only available via `extraManifests`.
+- CI: `govulncheck` job (+ `make vuln`), CodeQL workflow, OpenSSF Scorecard workflow, kind-based chart install test (builds the image, `helm install --wait`, probes `/healthz` + `/readyz`).
+
+### Changed
+- **Callback processing is time-bounded** (15s per `callback_query`): a stuck Alertmanager or Telegram call no longer stalls the updates poller for minutes; the user still receives an answer.
+- **Graceful shutdown waits for background workers** (poller, sweepers, health probe) up to `server.shutdown_timeout`, so an in-flight silence completes its ack/edit.
+- **Kubewatch fingerprint now includes the event message**: dedup only absorbs identical redeliveries instead of collapsing distinct events on the same object for the whole TTL.
+- Silence buttons whose `callback_data` would exceed Telegram's 64-byte limit are skipped at build time instead of failing the whole `sendMessage`.
+- `getUpdates` long polling reuses a dedicated keep-alive HTTP client instead of building one per poll.
+- Supply chain: all GitHub Actions pinned to commit SHAs; Docker base images pinned by digest; builder synced to Go 1.26 (was downloading the toolchain at build time).
+- Internal: `LabelCache` eviction is O(1) (`container/list`), duplicated error-unwrap helpers replaced with `errors.As`.
+
+### Fixed
+- README: comparison table claimed inline buttons were «planned» (shipped in 0.1.0), metrics table was missing the callbacks/silences/poll-errors metrics, prerequisites mentioned a non-existent `startupProbe`.
+
 ## [0.2.0] - 2026-05-06
 
 Reliability hardening for the Alertmanager-retry duplicate problem: when alertly successfully delivered a message to Telegram but did not ACK the webhook in time, Alertmanager would retry and the same alert was posted twice. Two complementary changes close that path. Defaults are safe — existing deployments get the fix on upgrade with no config changes required.
@@ -79,7 +102,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/MaksimRudakov/alertly/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/MaksimRudakov/alertly/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/MaksimRudakov/alertly/compare/v0.0.3...v0.1.0
 [0.0.3]: https://github.com/MaksimRudakov/alertly/compare/v0.0.1...v0.0.3

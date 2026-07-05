@@ -26,6 +26,7 @@ var (
 	SilencesCreated       *prometheus.CounterVec
 	UpdatesPollErrors     *prometheus.CounterVec
 	DedupSkipped          *prometheus.CounterVec
+	LabelCacheLookups     *prometheus.CounterVec
 )
 
 func Init() *prometheus.Registry {
@@ -104,6 +105,11 @@ func Init() *prometheus.Registry {
 			Help: "Number of notification deliveries suppressed by the in-process dedup cache (caller retry of an already-delivered notification).",
 		}, []string{"source", "chat_id", "status"})
 
+		LabelCacheLookups = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_label_cache_lookups_total",
+			Help: "Number of label-cache fallback lookups during callback handling, per result (hit/miss).",
+		}, []string{"result"})
+
 		registry.MustRegister(
 			NotificationsReceived,
 			NotificationsSent,
@@ -119,6 +125,7 @@ func Init() *prometheus.Registry {
 			SilencesCreated,
 			UpdatesPollErrors,
 			DedupSkipped,
+			LabelCacheLookups,
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)
@@ -129,3 +136,16 @@ func Init() *prometheus.Registry {
 func Registry() *prometheus.Registry { return registry }
 
 func ChatLabel(chatID int64) string { return strconv.FormatInt(chatID, 10) }
+
+// RegisterSizeGauge exposes fn() as a gauge evaluated on scrape. Meant for
+// cache/tracker sizes that otherwise grow invisibly. Call once per name after
+// Init(); duplicate names panic by design (programming error, not runtime state).
+func RegisterSizeGauge(name, help string, fn func() int) {
+	if registry == nil || fn == nil {
+		return
+	}
+	registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: name,
+		Help: help,
+	}, func() float64 { return float64(fn()) }))
+}

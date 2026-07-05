@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -120,22 +121,49 @@ func run() error {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var wg sync.WaitGroup
+	startWorker := func(w func(context.Context)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w(rootCtx)
+		}()
+	}
+
 	if dryRun {
 		readiness.MarkReady()
 		logger.Warn("DRY_RUN active: telegram calls are skipped")
 	} else {
-		go startupCheck(rootCtx, tgClient, readiness, logger)
+		startWorker(func(ctx context.Context) { telegramHealthLoop(ctx, tgClient, readiness, logger, time.Minute) })
 	}
 
 	for _, w := range bgWorkers {
-		go w(rootCtx)
+		startWorker(w)
 	}
 
 	if dedupCache != nil {
-		go dedupCache.Run(rootCtx, 0)
+		startWorker(func(ctx context.Context) { dedupCache.Run(ctx, 0) })
+		metrics.RegisterSizeGauge("alertly_dedup_cache_entries",
+			"Current number of entries in the dedup cache.", dedupCache.Len)
 	}
 
-	return srv.Run(rootCtx)
+	err = srv.Run(rootCtx)
+
+	// srv.Run returns after graceful HTTP shutdown (or a listen error). Cancel
+	// the workers explicitly for the error path and wait so a callback that is
+	// mid-CreateSilence can finish its ack/edit instead of being cut off.
+	stop()
+	workersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(workersDone)
+	}()
+	select {
+	case <-workersDone:
+	case <-time.After(cfg.Server.ShutdownTimeout):
+		logger.Warn("background workers did not stop within shutdown timeout")
+	}
+	return err
 }
 
 func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logger) (server.KeyboardBuilder, server.ButtonRegistrar, []func(context.Context), error) {
@@ -152,6 +180,10 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 
 	cache := alertmanager.NewLabelCache(cfg.Updates.LabelCacheTTL, cfg.Updates.LabelCacheMax)
 	tracker := server.NewButtonTracker(cfg.Updates.ButtonTTL)
+	metrics.RegisterSizeGauge("alertly_label_cache_entries",
+		"Current number of fingerprints in the Alertmanager label cache.", cache.Len)
+	metrics.RegisterSizeGauge("alertly_button_tracker_entries",
+		"Current number of alert messages with active silence buttons.", tracker.Len)
 
 	durations := make(map[string]time.Duration, len(cfg.Updates.SilenceDurations))
 	for _, d := range cfg.Updates.SilenceDurations {
@@ -177,6 +209,7 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		Durations:     cfg.Updates.SilenceDurations,
 		ChatAllowlist: cfg.Updates.ChatAllowlist,
 		Cache:         cache,
+		Logger:        logger,
 	}
 
 	poller := &server.UpdatesPoller{
@@ -227,37 +260,67 @@ func requireEnv(name string) string {
 	return strings.TrimSpace(os.Getenv(name))
 }
 
-func startupCheck(ctx context.Context, c telegram.Client, r server.ReadinessTracker, logger *slog.Logger) {
+// telegramHealthLoop drives readiness from Telegram getMe. During startup any
+// failure keeps the pod unready (original startupCheck behaviour). Once ready,
+// it keeps probing every probeInterval so an outage is detected even when no
+// webhooks are flowing; a few consecutive failures are tolerated to avoid
+// flapping on transient errors. It never overrides a send-failure-driven
+// unready state with MarkReady: recovery from that path comes via
+// RecordSendSuccess, probe success only re-arms probe-driven unreadiness.
+func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.ReadinessTracker, logger *slog.Logger, probeInterval time.Duration) {
+	const (
+		probeTimeout     = 10 * time.Second
+		maxBackoff       = 30 * time.Second
+		failureThreshold = 3
+	)
 	backoff := time.Second
-	maxBackoff := 30 * time.Second
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
+	consecFails := 0
+	everReady := false
+	probeUnready := true // startup counts as probe-driven unreadiness
 
-		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	for {
+		callCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		err := c.GetMe(callCtx)
 		cancel()
-		if err == nil {
-			logger.Info("telegram getMe ok; readiness=ready")
-			r.MarkReady()
+		if ctx.Err() != nil {
 			return
 		}
-		logger.Warn("telegram getMe failed", "err", err, "next_retry_ms", backoff.Milliseconds())
-		r.MarkUnready("telegram getMe failed: " + err.Error())
+
+		var wait time.Duration
+		if err == nil {
+			if probeUnready {
+				logger.Info("telegram getMe ok; readiness=ready")
+				r.MarkReady()
+				probeUnready = false
+			}
+			everReady = true
+			consecFails = 0
+			backoff = time.Second
+			wait = probeInterval
+		} else {
+			consecFails++
+			logger.Warn("telegram getMe failed",
+				"err", err,
+				"consecutive", consecFails,
+				"next_retry_ms", backoff.Milliseconds(),
+			)
+			if !everReady || consecFails >= failureThreshold {
+				r.MarkUnready("telegram getMe failed: " + err.Error())
+				probeUnready = true
+			}
+			wait = backoff
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+		}
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
+		case <-time.After(wait):
 		}
 	}
 }

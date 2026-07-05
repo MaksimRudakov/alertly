@@ -1,5 +1,5 @@
-ARG GO_VERSION=1.25
-FROM golang:${GO_VERSION}-alpine AS builder
+ARG GO_VERSION=1.26
+FROM golang:${GO_VERSION}-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS builder
 
 ARG VERSION=dev
 ARG COMMIT=none
@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -X github.com/MaksimRudakov/alertly/internal/version.Date=${DATE}" \
       -o /alertly ./cmd/alertly
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
 
 USER 65532:65532
 COPY --from=builder /alertly /alertly

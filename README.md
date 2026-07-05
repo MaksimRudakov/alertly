@@ -11,6 +11,7 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 ## Features
 
 - Sources: Alertmanager (v4 webhook) and Kubewatch (new + legacy payload).
+- **Interactive Silence buttons** on firing Alertmanager alerts: inline keyboard via Telegram long polling, silences created through the Alertmanager API v2, chat/user allowlists, TTL-limited button window. Off by default (`updates.enabled`).
 - Multiple chats and topic threads per webhook URL: `/v1/alertmanager/-100123,-100456:42`.
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
 - **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
@@ -36,7 +37,7 @@ docker run --rm -p 8080:8080 \
 
 ### Prerequisites
 
-- Kubernetes 1.25+ (probes use `startupProbe`-compatible semantics).
+- Kubernetes 1.25+.
 - Helm 3.8+ (required for OCI install; any 3.x works for the HTTP repo).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and any random string for `WEBHOOK_AUTH_TOKEN` (at least 32 chars recommended).
 - The bot added to the target chat(s); get the chat ID from [@RawDataBot](https://t.me/RawDataBot) or your own method.
@@ -54,7 +55,7 @@ helm search repo alertly
 OCI (GitHub Container Registry, no `helm repo add` needed):
 
 ```bash
-helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.2.0
+helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.3.0
 ```
 
 ### Install
@@ -64,7 +65,7 @@ Quick install with tokens passed directly (fine for a lab / personal cluster —
 ```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.2.0 \
+  --version 0.3.0 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
@@ -74,7 +75,7 @@ Or from OCI:
 ```bash
 helm install alertly oci://ghcr.io/maksimrudakov/charts/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.2.0 \
+  --version 0.3.0 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
@@ -100,7 +101,7 @@ Then install referencing it:
 ```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.2.0 \
+  --version 0.3.0 \
   --set secret.create=false \
   --set secret.existingSecret=alertly-tokens \
   --set reloader.enabled=true   # optional: auto-restart on Secret/ConfigMap changes
@@ -117,15 +118,15 @@ Both the chart tarball (attached to the GitHub Release) and the OCI chart manife
 cosign verify \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/maksimrudakov/charts/alertly:0.2.0
+  ghcr.io/maksimrudakov/charts/alertly:0.3.0
 
-# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.2.0 release)
+# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.3.0 release)
 cosign verify-blob \
-  --certificate alertly-0.2.0.tgz.pem \
-  --signature alertly-0.2.0.tgz.sig \
+  --certificate alertly-0.3.0.tgz.pem \
+  --signature alertly-0.3.0.tgz.sig \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  alertly-0.2.0.tgz
+  alertly-0.3.0.tgz
 ```
 
 The container image `ghcr.io/maksimrudakov/alertly` is signed the same way.
@@ -156,7 +157,7 @@ Full list of values with defaults and descriptions: [`charts/alertly/README.md`]
 | `POST` | `/v1/alertmanager/{chats}` | Bearer | Alertmanager webhook |
 | `POST` | `/v1/kubewatch/{chats}` | Bearer | Kubewatch webhook |
 | `GET`  | `/healthz` | — | Liveness |
-| `GET`  | `/readyz`  | — | Readiness (`getMe` ok + recent send health) |
+| `GET`  | `/readyz`  | — | Readiness (periodic `getMe` probe + recent send health) |
 | `GET`  | `/metrics` | — | Prometheus metrics |
 
 `{chats}` accepts a comma-separated list of chat IDs with an optional thread:
@@ -173,6 +174,8 @@ Path from `ALERTLY_CONFIG` (default `/etc/alertly/config.yaml`). See [examples/c
 | `ALERTLY_CONFIG` | no  | Path to config (default `/etc/alertly/config.yaml`) |
 | `LOG_LEVEL` | no  | Override `logging.level` from config |
 | `DRY_RUN`   | no  | When `true`, skip Telegram calls but log/meter |
+| `ALERTMANAGER_AUTH_USERNAME` / `ALERTMANAGER_AUTH_PASSWORD` | no | Basic auth for the Alertmanager API (silence buttons) |
+| `ALERTMANAGER_AUTH_TOKEN` | no | Bearer auth for the Alertmanager API (takes precedence over basic) |
 
 Hot reload of config is intentionally **not** supported in-process — use [`stakater/Reloader`](https://github.com/stakater/Reloader) to roll the Deployment on ConfigMap/Secret change.
 
@@ -180,11 +183,35 @@ Hot reload of config is intentionally **not** supported in-process — use [`sta
 
 Stored inline in YAML, parsed via `text/template`. Helper funcs: `severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`. A template named per source (`alertmanager`, `kubewatch`) is preferred; falls back to `default`.
 
+> **Escaping**: templates are `text/template`, not `html/template` — there is no auto-escaping. With `parse_mode: HTML`, always pipe user-controlled fields (`.Title`, `.Body`, `.Labels`, `.Annotations`) through `escape_html`, otherwise a label containing `<` or `&` makes Telegram reject the whole message with 400.
+
+## Interactive silence buttons
+
+Firing Alertmanager alerts can carry a row of `🔇 Silence 1h/4h/24h` inline buttons. Pressing one creates a silence via `POST /api/v2/silences` with exact-match matchers built from all alert labels. Delivery of button presses uses Telegram **long polling** (`getUpdates`) — no inbound endpoint or Ingress changes.
+
+```yaml
+updates:
+  enabled: true
+  chat_allowlist: [-1001234567890]   # required: only these chats can silence
+  user_allowlist: []                 # optional: restrict to specific user IDs
+  silence_durations: ["1h", "4h", "24h"]
+  button_ttl: 8h                     # buttons expire and are stripped after this
+alertmanager:
+  url: http://alertmanager.monitoring.svc:9093
+```
+
+Operational notes:
+
+- Buttons expire after `button_ttl`; a background sweeper strips expired keyboards, late clicks are rejected.
+- Button state is in-memory: after a pod restart old buttons are rejected with «Silence window expired» (strict policy — no accidental silences from stale state).
+- Callback processing is bounded (15s per press) and transient Alertmanager errors are retried; delivery of callbacks is at-least-once, so in a narrow crash window a silence can be created twice — duplicates are harmless (identical matchers).
+- Labels are resolved via the AM API with an in-process fallback cache, so resolving works even when AM has already dropped the alert.
+
 ## Deduplication
 
 Telegram has no idempotency key, so any retry from upstream — most commonly Alertmanager re-sending a webhook because the previous response did not arrive in time — would be delivered as a fresh chat message. alertly absorbs that retry with a small in-process cache.
 
-Key: `fingerprint | chat_id | thread_id | status` (so `firing` and `resolved` of the same alert are kept separate).
+Key: `fingerprint | chat_id | thread_id | status` (so `firing` and `resolved` of the same alert are kept separate). For Kubewatch the fingerprint includes the event message, so two different events on the same object (e.g. `CrashLoopBackOff` with changing restart counts) are **not** collapsed — only identical redeliveries are.
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -203,7 +230,7 @@ The cache is **per-process**. With multiple alertly replicas behind a `Service`,
 
 | Setup | When | Note |
 |---|---|---|
-| `replicaCount: 1` + PDB `maxUnavailable: 0` | **default recommendation** | alertly is stateless and lightweight; restart window is the only dedup blind-spot. |
+| `replicaCount: 1` + PDB `maxUnavailable: 0` | **default recommendation** | alertly is stateless and lightweight; restart window is the only dedup blind-spot. Enable via `podDisruptionBudget.enabled=true` in the chart (note: with 1 replica it blocks voluntary node drains until the pod is moved manually). |
 | `replicaCount: N` + Ingress with consistent-hash on path | when an HA policy mandates >1 replica | e.g. nginx `nginx.ingress.kubernetes.io/upstream-hash-by: "$request_uri"` — same `/v1/.../{chats}` URL always goes to the same pod. |
 | Shared cache (Redis / Valkey) | not implemented | Would only be worth it if the HA Alertmanager pair itself fans out the same webhook from both replicas. Kept out of scope until a real signal demands it. |
 
@@ -220,7 +247,7 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | Multiple chats per webhook URL | yes | yes | n/a | per-receiver |
 | Topic threads | yes | no | n/a | yes |
 | Message splitting >4096 | yes | no (truncates) | n/a | no (errors) |
-| Inline buttons (Phase 2) | planned | no | yes | no |
+| Inline silence buttons | yes | no | yes | no |
 | Per-chat rate limit | yes | no | n/a | no |
 | Prometheus metrics | yes | no | yes | yes |
 
@@ -238,9 +265,16 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | `alertly_auth_failures_total` | counter | — |
 | `alertly_source_parse_duration_seconds` | histogram | `source` |
 | `alertly_dedup_skipped_total` | counter | `source`, `chat_id`, `status` |
+| `alertly_callbacks_received_total` | counter | `action`, `status` |
+| `alertly_silences_created_total` | counter | `status` |
+| `alertly_updates_poll_errors_total` | counter | `reason` |
+| `alertly_label_cache_lookups_total` | counter | `result` (`hit`/`miss`) |
+| `alertly_dedup_cache_entries` | gauge | — |
+| `alertly_button_tracker_entries` | gauge | — |
+| `alertly_label_cache_entries` | gauge | — |
 | `alertly_build_info` | gauge | `version`, `commit`, `go_version` |
 
-`alertly_telegram_retries_total` uses these `reason` values: `429`, `5xx`, `network`, and `deadline_skip` (retry aborted because the request context would expire before the next backoff completed).
+`alertly_telegram_retries_total` uses these `reason` values: `429`, `5xx`, `network`, and `deadline_skip` (retry aborted because the request context would expire before the next backoff completed). The `*_entries` gauges expose in-process cache sizes so unexpected growth is visible.
 
 ## Troubleshooting
 
@@ -253,6 +287,9 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | Long messages dropped silently | not split? always check `alertly_message_split_total` | verify `parse_mode` is `HTML` and template doesn't emit unbalanced tags |
 | Same alert delivered to Telegram twice | multiple alertly replicas without sticky routing | run `replicaCount: 1`, or hash the request path to a pod (see [Deduplication › Scaling](#scaling-considerations)) |
 | `alertly_telegram_retries_total{reason="deadline_skip"}` growing | server `WriteTimeout` shorter than worst-case retry budget | raise `server.write_timeout` or lower `telegram.retry.max_backoff`; check Telegram `Retry-After` headers in logs |
+| Silence buttons not shown on alerts | `updates.enabled: false`, chat not in `chat_allowlist`, or alert not `firing` | enable updates, add the chat ID to `updates.chat_allowlist`; buttons are only attached to firing Alertmanager alerts |
+| Button press answers «Silence window expired» | button older than `updates.button_ttl` or alertly restarted since the message was sent | expected (strict policy); re-fire the alert or silence via AM UI |
+| Button press answers «Failed to query Alertmanager» | `alertmanager.url` wrong/unreachable or auth missing | check `alertmanager.url`, `ALERTMANAGER_AUTH_*` env, NetworkPolicy to AM; see `alertly_updates_poll_errors_total` and logs |
 
 ## Architecture
 

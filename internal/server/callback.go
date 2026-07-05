@@ -158,8 +158,10 @@ func (h *CallbackHandler) resolveLabels(ctx context.Context, fingerprint string)
 	}
 	if errors.Is(err, alertmanager.ErrAlertNotFound) {
 		if cached, ok := h.deps.Cache.Get(fingerprint); ok {
+			metrics.LabelCacheLookups.WithLabelValues("hit").Inc()
 			return cached, nil
 		}
+		metrics.LabelCacheLookups.WithLabelValues("miss").Inc()
 		return nil, alertmanager.ErrAlertNotFound
 	}
 	return nil, err
@@ -175,9 +177,10 @@ func (h *CallbackHandler) stripKeyboard(ctx context.Context, cq *telegram.Callba
 }
 
 func (h *CallbackHandler) answer(ctx context.Context, id, text string, showAlert bool) {
-	// Answer must be sent within ~15s or Telegram shows "loading…". Use a short,
-	// context-bounded timeout so a stuck AM does not block the ack.
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// Answer must be sent within ~15s or Telegram shows "loading…". Detach from
+	// the parent so the user still gets feedback when the per-callback handle
+	// budget was spent inside an AM call, but keep our own short timeout.
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := h.deps.Telegram.AnswerCallbackQuery(cctx, id, text, showAlert); err != nil {
 		h.deps.Logger.Warn("answerCallbackQuery failed", "err", err)

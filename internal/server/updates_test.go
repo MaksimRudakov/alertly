@@ -135,3 +135,87 @@ func TestUpdatesPoller_ShutdownOnCtxCancel(t *testing.T) {
 		t.Fatal("poller did not exit within 3s of cancel")
 	}
 }
+
+// A stuck Alertmanager must not stall the poll loop: the per-callback timeout
+// bounds Handle, the user still gets an answer, and the next update is
+// processed promptly.
+func TestUpdatesPoller_HandleTimeoutUnblocksLoop(t *testing.T) {
+	var answerCalls atomic.Int32
+	var secondCallbackSeen atomic.Int32
+
+	tgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			var req struct {
+				Offset int64 `json:"offset"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			switch {
+			case req.Offset <= 1:
+				_, _ = io.WriteString(w, `{"ok":true,"result":[{"update_id":1,"callback_query":{"id":"cb1","from":{"id":42},"message":{"message_id":7,"chat":{"id":-100}},"data":"s|fp1|1h"}}]}`)
+			case req.Offset == 2:
+				secondCallbackSeen.Add(1)
+				_, _ = io.WriteString(w, `{"ok":true,"result":[]}`)
+			default:
+				_, _ = io.WriteString(w, `{"ok":true,"result":[]}`)
+			}
+		case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"):
+			answerCalls.Add(1)
+			_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
+		case strings.HasSuffix(r.URL.Path, "/editMessageReplyMarkup"):
+			_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer tgSrv.Close()
+
+	// AM hangs until the request context is canceled — simulates a stuck AM.
+	amSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer amSrv.Close()
+
+	tg := telegram.New(telegram.Config{APIURL: tgSrv.URL, Token: "t", RequestTimeout: 2 * time.Second, MaxAttempts: 1},
+		telegram.NewLimiter(1000, 1000), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	am := alertmanager.New(alertmanager.Config{URL: amSrv.URL, RequestTimeout: 30 * time.Second})
+	tracker := NewButtonTracker(time.Hour)
+	tracker.Register(-100, 7, "fp1")
+	handler := NewCallbackHandler(CallbackDeps{
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Telegram:      tg,
+		AM:            am,
+		Cache:         alertmanager.NewLabelCache(time.Hour, 10),
+		Tracker:       tracker,
+		ChatAllowlist: []int64{-100},
+		Durations:     map[string]time.Duration{"1h": time.Hour},
+	})
+	poller := &UpdatesPoller{
+		Client:        tg,
+		Handler:       handler,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PollTimeout:   50 * time.Millisecond,
+		HandleTimeout: 200 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { poller.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if secondCallbackSeen.Load() >= 1 && answerCalls.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if secondCallbackSeen.Load() < 1 {
+		t.Error("poller stayed blocked on stuck AM: never advanced past the first callback")
+	}
+	if answerCalls.Load() < 1 {
+		t.Error("user never got an answer for the timed-out callback")
+	}
+}

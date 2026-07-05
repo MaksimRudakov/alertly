@@ -1,6 +1,6 @@
 # alertly
 
-![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.2.0](https://img.shields.io/badge/AppVersion-0.2.0-informational?style=flat-square)
+![Version: 0.3.0](https://img.shields.io/badge/Version-0.3.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.3.0](https://img.shields.io/badge/AppVersion-0.3.0-informational?style=flat-square)
 
 Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 
@@ -31,7 +31,7 @@ Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 | config.updates.user_allowlist | list | `[]` | Optional user allowlist within allowlisted chats. Empty = any chat member. |
 | env | object | `{"LOG_LEVEL":"info"}` | Env vars passed to the container. Keys become env names, values are quoted as strings. |
 | extraEnv | list | `[]` | Extra env vars in full k8s EnvVar form (supports `valueFrom`). |
-| extraManifests | list | `[]` | Raw manifests rendered as-is. Use for PodMonitor/ServiceMonitor, PDB, NetworkPolicy, etc. without forking the chart.  Example — PodMonitor for kube-prometheus-stack: extraManifests:   - apiVersion: monitoring.coreos.com/v1     kind: PodMonitor     metadata:       name: alertly       labels:         release: kube-prometheus-stack     spec:       selector:         matchLabels:           app.kubernetes.io/name: alertly       podMetricsEndpoints:         - port: http           path: /metrics           interval: 30s  Example — PodDisruptionBudget: extraManifests:   - apiVersion: policy/v1     kind: PodDisruptionBudget     metadata:       name: alertly     spec:       maxUnavailable: 0       selector:         matchLabels:           app.kubernetes.io/name: alertly |
+| extraManifests | list | `[]` | Raw manifests rendered as-is. Use for resources the chart does not template natively (e.g. NetworkPolicy). For Prometheus scraping and disruption budgets prefer the native `metrics.serviceMonitor` and `podDisruptionBudget` blocks above. |
 | fullnameOverride | string | `""` | Override full release name. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"ghcr.io/maksimrudakov/alertly"` | Container image repository. |
@@ -42,9 +42,19 @@ Webhook-to-Telegram bridge for Alertmanager and Kubewatch
 | ingress.enabled | bool | `false` | Enable Ingress for the alertly webhook endpoint. |
 | ingress.hosts | list | `[{"host":"alertly.example.com","paths":[{"path":"/","pathType":"Prefix"}]}]` | Ingress host/path rules. |
 | ingress.tls | list | `[]` | Ingress TLS blocks. |
+| metrics.serviceMonitor.additionalLabels | object | `{}` | Extra labels on the ServiceMonitor (e.g. `release: kube-prometheus-stack` to match the operator's serviceMonitorSelector). |
+| metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for the Prometheus Operator. Requires the monitoring.coreos.com/v1 CRDs — rendering fails with a hint when the cluster does not expose them. |
+| metrics.serviceMonitor.honorLabels | bool | `false` | Keep target labels on collision with server-side labels. |
+| metrics.serviceMonitor.interval | string | `"30s"` | Scrape interval. |
+| metrics.serviceMonitor.metricRelabelings | list | `[]` | Metric relabelings applied to samples before ingestion. |
+| metrics.serviceMonitor.relabelings | list | `[]` | Relabelings applied to targets before scraping. |
+| metrics.serviceMonitor.scrapeTimeout | string | `""` | Scrape timeout. Empty = Prometheus default. |
 | nameOverride | string | `""` | Override chart name. |
 | nodeSelector | object | `{}` | Pod nodeSelector. |
 | podAnnotations | object | `{}` | Extra annotations for the pod. |
+| podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget. Recommended setup for the default `replicaCount: 1`: `maxUnavailable: 0` protects the in-process dedup window (`config.dedup` is per-pod) from voluntary evictions — but with a single replica it also blocks node drain until manual intervention, hence disabled by default. Enable it when losing the dedup window on drain is worse for you than a stuck drain. |
+| podDisruptionBudget.maxUnavailable | int | `0` | Max pods that may be voluntarily evicted. Used when `minAvailable` is not set. |
+| podDisruptionBudget.minAvailable | string | `""` | Min pods that must stay available (int or percentage). Mutually exclusive with `maxUnavailable`; takes precedence when set. |
 | podLabels | object | `{}` | Extra labels for the pod. |
 | podSecurityContext | object | `{"fsGroup":65532,"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod-level security context. |
 | priorityClassName | string | `""` | Pod priorityClassName. |

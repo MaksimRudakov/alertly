@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -149,5 +150,98 @@ func TestMatchersFromLabels(t *testing.T) {
 		if !x.IsEqual || x.IsRegex {
 			t.Errorf("matcher flags wrong: %+v", x)
 		}
+	}
+}
+
+// Transient 5xx must be retried transparently for both the labels lookup and
+// silence creation; a persistent 4xx must not be retried.
+func TestGetAlertLabels_RetriesTransient5xx(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		_, _ = io.WriteString(w, `[{"fingerprint":"fp","labels":{"alertname":"X"}}]`)
+	}))
+	defer srv.Close()
+
+	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
+	labels, err := c.GetAlertLabels(context.Background(), "fp")
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if labels["alertname"] != "X" {
+		t.Errorf("labels: %#v", labels)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("expected 2 attempts, got %d", calls.Load())
+	}
+}
+
+func TestCreateSilence_RetriesTransient5xx(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			w.WriteHeader(502)
+			return
+		}
+		// The request body must be re-sent intact on retry.
+		var req SilenceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Matchers) != 1 {
+			t.Errorf("retry lost request body: err=%v matchers=%+v", err, req.Matchers)
+		}
+		_, _ = io.WriteString(w, `{"silenceID":"s-retry"}`)
+	}))
+	defer srv.Close()
+
+	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
+	id, err := c.CreateSilence(context.Background(), SilenceRequest{
+		Matchers: []Matcher{{Name: "alertname", Value: "X", IsEqual: true}},
+	})
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if id != "s-retry" {
+		t.Errorf("silence id: %s", id)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("expected 2 attempts, got %d", calls.Load())
+	}
+}
+
+func TestCreateSilence_NoRetryOn4xx(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(400)
+		_, _ = io.WriteString(w, `invalid matcher`)
+	}))
+	defer srv.Close()
+
+	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
+	if _, err := c.CreateSilence(context.Background(), SilenceRequest{}); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls.Load() != 1 {
+		t.Errorf("4xx must not be retried, got %d attempts", calls.Load())
+	}
+}
+
+func TestLabelCache_Len(t *testing.T) {
+	c := NewLabelCache(time.Hour, 10)
+	if c.Len() != 0 {
+		t.Errorf("empty cache Len: %d", c.Len())
+	}
+	c.Put("a", map[string]string{"x": "1"})
+	c.Put("b", map[string]string{"x": "2"})
+	c.Put("a", map[string]string{"x": "3"}) // update, not a new entry
+	if c.Len() != 2 {
+		t.Errorf("Len after 2 distinct puts: %d", c.Len())
+	}
+	var nilCache *LabelCache
+	if nilCache.Len() != 0 {
+		t.Error("nil cache Len should be 0")
 	}
 }
