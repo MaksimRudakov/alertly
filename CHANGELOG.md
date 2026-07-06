@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-06
+
+In-chat silence UX round-trip (create → undo, configurable scope) and a generic JSON source for arbitrary senders. Backward compatible: defaults preserve existing behaviour; undo only affects deployments with `updates.enabled=true`.
+
 ### Added
 - **Generic webhook source** (`POST /v1/generic/{chats}`): alertly's own JSON contract (`title`, `body`, `severity`, `status`, `fingerprint`, `labels`, `annotations`, `links`, `timestamp`; single object or array up to 100). Any tool that can POST JSON — GitLab CI, Jira automation, ArgoCD notifications webhook, scripts — gets dedup, splitting, threads and rate limiting. Fingerprint is content-hashed when absent, so sender retries are absorbed. README documents the contract with GitLab/ArgoCD/Jira examples.
 - **↩️ Undo button**: after a silence is created the keyboard is replaced with a short-lived Undo button that deletes the silence via `DELETE /api/v2/silence/{id}`. Window is `updates.undo_window` (default `5m`, `0` disables, max `1h`); state is in-memory with the same strict expire-on-restart policy. Metrics: `alertly_silences_deleted_total{status}`, gauge `alertly_undo_tracker_entries`.
@@ -107,7 +111,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/MaksimRudakov/alertly/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/MaksimRudakov/alertly/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/MaksimRudakov/alertly/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/MaksimRudakov/alertly/compare/v0.0.3...v0.1.0

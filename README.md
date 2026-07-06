@@ -55,7 +55,7 @@ helm search repo alertly
 OCI (GitHub Container Registry, no `helm repo add` needed):
 
 ```bash
-helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.3.0
+helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.4.0
 ```
 
 ### Install
@@ -65,7 +65,7 @@ Quick install with tokens passed directly (fine for a lab / personal cluster —
 ```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.3.0 \
+  --version 0.4.0 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
@@ -75,7 +75,7 @@ Or from OCI:
 ```bash
 helm install alertly oci://ghcr.io/maksimrudakov/charts/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.3.0 \
+  --version 0.4.0 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
@@ -101,7 +101,7 @@ Then install referencing it:
 ```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.3.0 \
+  --version 0.4.0 \
   --set secret.create=false \
   --set secret.existingSecret=alertly-tokens \
   --set reloader.enabled=true   # optional: auto-restart on Secret/ConfigMap changes
@@ -118,15 +118,15 @@ Both the chart tarball (attached to the GitHub Release) and the OCI chart manife
 cosign verify \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/maksimrudakov/charts/alertly:0.3.0
+  ghcr.io/maksimrudakov/charts/alertly:0.4.0
 
-# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.3.0 release)
+# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.4.0 release)
 cosign verify-blob \
-  --certificate alertly-0.3.0.tgz.pem \
-  --signature alertly-0.3.0.tgz.sig \
+  --certificate alertly-0.4.0.tgz.pem \
+  --signature alertly-0.4.0.tgz.sig \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  alertly-0.3.0.tgz
+  alertly-0.4.0.tgz
 ```
 
 The container image `ghcr.io/maksimrudakov/alertly` is signed the same way.
