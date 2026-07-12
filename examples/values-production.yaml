@@ -3,7 +3,7 @@
 # Install:
 #   helm install alertly alertly/alertly \
 #     --namespace monitoring-system --create-namespace \
-#     --version 0.3.0 \
+#     --version 0.4.0 \
 #     -f examples/values-production.yaml
 #
 # Prerequisites:
