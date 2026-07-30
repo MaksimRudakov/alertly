@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+- **/status pipeline diagnostics** (`updates.commands.status.*`): the reply now includes an Alertmanager section — AM version/cluster state via `GET /api/v2/status`, firing/silenced alert counts, a **Watchdog deadman check** (always-firing alert present and fresh in AM ⇒ Prometheus → AM pipeline alive; name configurable via `watchdog_alert`, stale threshold 15m) and last webhook received / last Telegram delivery timestamps. Distinguishes «AM down», «Prometheus down» and «genuinely quiet» when an alert chat goes silent. Per-call AM budget `pipeline_timeout` (default 4s).
+
+### Fixed
+- `/status` «Last Telegram check» now reflects the most recent getMe probe (previously it froze at the last readiness transition and grew unbounded).
+- `/status` shows the short (8-char) commit hash instead of the full 40 characters.
+
 ## [0.5.0] - 2026-07-30
 
 Read-only chat-ops (`/status`) and supply-chain/CI hardening. First tagged release since 0.3.0 — the 0.4.0 changelog entry below was merged to `main` but never tagged, so 0.5.0 artifacts are the first to include both feature sets. Backward compatible: commands are off by default.

@@ -137,6 +137,24 @@ type fakeAM struct {
 	deletedIDs    []string
 	mu            sync.Mutex
 	getAlertCalls int
+	statusInfo    alertmanager.StatusInfo
+	statusErr     error
+	overview      alertmanager.AlertsOverview
+	overviewErr   error
+}
+
+func (f *fakeAM) Status(context.Context) (alertmanager.StatusInfo, error) {
+	if f.statusErr != nil {
+		return alertmanager.StatusInfo{}, f.statusErr
+	}
+	return f.statusInfo, nil
+}
+
+func (f *fakeAM) AlertsOverview(context.Context, string) (alertmanager.AlertsOverview, error) {
+	if f.overviewErr != nil {
+		return alertmanager.AlertsOverview{}, f.overviewErr
+	}
+	return f.overview, nil
 }
 
 func (f *fakeAM) GetAlertLabels(_ context.Context, fp string) (map[string]string, error) {

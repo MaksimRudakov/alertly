@@ -225,7 +225,13 @@ updates:
     enabled: true
 ```
 
-- `/status` — alertly self-health: version, uptime, readiness (with reason when unready), time of the last Telegram check and in-memory cache sizes (dedup, silence/undo buttons, label cache). Lets on-call verify «is the monitoring pipeline alive» without opening Grafana or `/metrics`.
+- `/status` — alertly self-health **and delivery-pipeline diagnostics**: version, uptime, readiness (with reason when unready), time of the last Telegram check, cache sizes — plus, with `commands.status.pipeline: true` (default), an Alertmanager/Prometheus section that answers the on-call question *«the chat went quiet — is that AM down, Prometheus down, or genuinely no alerts?»*:
+  - **Alertmanager**: `GET /api/v2/status` — version and cluster state, or an explicit «unreachable» line when AM is down;
+  - **Watchdog deadman check**: the always-firing `Watchdog` alert (kube-prometheus-stack) must be present and fresh in AM — missing or stale (>15m) means the Prometheus → AM half of the pipeline died even though AM itself is up; the alert name is configurable via `commands.status.watchdog_alert` (empty disables);
+  - **Alerts in AM**: firing/silenced counts — «AM holds N firing but the last webhook is old» points at broken routing, «0 firing» means it is genuinely quiet;
+  - **Last webhook / last delivery**: in-memory timestamps of the last parsed webhook (with source) and the last successful Telegram send.
+
+  AM queries are bounded by `commands.status.pipeline_timeout` (default 4s) per call, so a dead AM only delays the reply, never blocks the poller.
 
 Access control is the same as for silence buttons: `chat_allowlist` (required) + optional `user_allowlist`. Unknown commands and non-allowlisted chats are ignored silently — the bot does not reply to unrelated group chatter or commands addressed to other bots. Register the command in [@BotFather](https://t.me/BotFather) via `/setcommands` (`status - alertly self-health`) to get autocompletion in the chat.
 

@@ -69,10 +69,21 @@ updates:
   # Allowed range: 0..1h.
   undo_window: 5m
   # commands: read-only chat-ops commands over the same long-poll loop and
-  # allowlists. Currently only /status (uptime, readiness, cache sizes).
-  # Register the command in BotFather (/setcommands) for autocompletion.
+  # allowlists. Currently only /status (uptime, readiness, delivery-pipeline
+  # health, cache sizes). Register in BotFather (/setcommands) for autocompletion.
   commands:
     enabled: false
+    status:
+      # pipeline: query AM (/api/v2/status + /api/v2/alerts) and show last
+      # webhook/delivery timestamps — answers "chat is quiet: is that AM down,
+      # Prometheus down, or genuinely no alerts?".
+      pipeline: true
+      # watchdog_alert: always-firing deadman's-switch alert. Present and fresh
+      # in AM = Prometheus → AM pipeline alive. "Watchdog" in
+      # kube-prometheus-stack; "" disables the check.
+      watchdog_alert: "Watchdog"
+      # pipeline_timeout: per-AM-call budget while building the reply.
+      pipeline_timeout: 4s
 
 alertmanager:
   url: ""                 # e.g. http://alertmanager.monitoring.svc:9093

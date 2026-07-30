@@ -37,6 +37,7 @@ type Deps struct {
 	Keyboard  KeyboardBuilder
 	Tracker   ButtonRegistrar
 	Dedup     *dedup.Cache
+	Activity  *ActivityTracker
 }
 
 func New(cfg config.Server, deps Deps) *Server {
@@ -64,6 +65,7 @@ func New(cfg config.Server, deps Deps) *Server {
 			keyboard:     deps.Keyboard,
 			tracker:      deps.Tracker,
 			dedup:        deps.Dedup,
+			activity:     deps.Activity,
 		})
 		mux.Handle(fmt.Sprintf("POST /v1/%s/{chats}", name), auth(h))
 	}

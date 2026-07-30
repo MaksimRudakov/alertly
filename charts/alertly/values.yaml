@@ -266,6 +266,15 @@ config:
     # allowlists. Register the command in BotFather (/setcommands) for autocompletion.
     commands:
       enabled: false
+      # -- /status reply tuning. `pipeline` adds AM health, alert counts, the
+      # Watchdog deadman check and last webhook/delivery timestamps —
+      # distinguishes "AM down" / "Prometheus down" / "genuinely quiet".
+      # `watchdog_alert`: always-firing alert name ("Watchdog" in
+      # kube-prometheus-stack), "" disables the check.
+      status:
+        pipeline: true
+        watchdog_alert: "Watchdog"
+        pipeline_timeout: 4s
 
   # -- Alertmanager connection for the silence action. Required when updates.enabled=true.
   # Auth is supplied via env: ALERTMANAGER_AUTH_USERNAME + _PASSWORD (basic) or ALERTMANAGER_AUTH_TOKEN (bearer).

@@ -27,6 +27,7 @@ type webhookDeps struct {
 	keyboard     KeyboardBuilder
 	tracker      ButtonRegistrar
 	dedup        *dedup.Cache
+	activity     *ActivityTracker
 }
 
 // ButtonRegistrar records sent alert messages so the callback handler can
@@ -80,6 +81,7 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "400").Inc()
 			return
 		}
+		d.activity.RecordWebhook(d.source.Name())
 
 		var (
 			totalAttempts int
@@ -178,6 +180,7 @@ func (d webhookDeps) send(ctx context.Context, target notification.ChatTarget, t
 	messageID, err := d.tg.SendMessage(ctx, target.ChatID, target.ThreadID, text, opts)
 	if err == nil {
 		d.readiness.RecordSendSuccess()
+		d.activity.RecordDelivery()
 		return messageID, nil
 	}
 	d.readiness.RecordSendFailure(isServerError(err))
