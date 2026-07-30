@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-30
+
+`/status` grows delivery-pipeline diagnostics: one command now answers «the alert chat went quiet — is Alertmanager down, is Prometheus down, or is it genuinely quiet?».
+
 ### Added
 - **/status pipeline diagnostics** (`updates.commands.status.*`): the reply now includes an Alertmanager section — AM version/cluster state via `GET /api/v2/status`, firing/silenced alert counts, a **Watchdog deadman check** (always-firing alert present and fresh in AM ⇒ Prometheus → AM pipeline alive; name configurable via `watchdog_alert`, stale threshold 15m) and last webhook received / last Telegram delivery timestamps. Distinguishes «AM down», «Prometheus down» and «genuinely quiet» when an alert chat goes silent. Per-call AM budget `pipeline_timeout` (default 4s).
 
