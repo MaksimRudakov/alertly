@@ -7,10 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `alertly` — Go HTTP service that ingests webhooks from Alertmanager and Kubewatch and forwards them to Telegram chats. Stdlib-first (`net/http` with `mux.Handle("POST /v1/...{chats}")`), no web framework.
 
 - Module: `github.com/MaksimRudakov/alertly`
-- Go: `1.25` (toolchain `go1.26.2`)
+- Go: `1.25` (toolchain `go1.26.5`)
 - Single binary entry: `cmd/alertly`
 
-Treat README + `examples/config.yaml` + `TODO.md` as the source of truth for current scope. Dedup and interactive silence buttons (Phase 2b) are shipped; `TODO.md` lists the remaining Phase 2/3 items (generic source, label routing, async queue, Markdown, chat-ops commands) that are intentionally deferred until a real signal demands them.
+Treat README + `examples/config.yaml` + `TODO.md` as the source of truth for current scope. Dedup, interactive silence buttons (Phase 2b), the generic source and the `/status` chat-ops command are shipped; `TODO.md` lists the remaining Phase 2/3 items (label routing, async queue, Markdown, `/alerts` command) that are intentionally deferred until a real signal demands them.
 
 ## Common commands
 
@@ -79,9 +79,10 @@ In-process TTL cache keyed by `fingerprint|chat_id|thread_id|status`. `Reserve(k
 
 Off by default; enabled via `updates.enabled` + `alertmanager.url`. Moving parts (all wired in `setupUpdates` in `main.go`):
 - `server.AlertmanagerKeyboard` (keyboard.go) attaches a `🔇 Silence <dur>` row to firing alertmanager notifications in allowlisted chats; buttons whose `callback_data` would exceed Telegram's 64-byte limit are skipped (a keyboard with no valid buttons is dropped).
-- `server.UpdatesPoller` (updates.go) long-polls `getUpdates` (`allowed_updates=["callback_query"]`) through a dedicated keep-alive HTTP client; each callback is handled synchronously under a 15s `HandleTimeout` so a stuck AM/Telegram call cannot stall the loop. Offset is in-memory → delivery is at-least-once.
+- `server.UpdatesPoller` (updates.go) long-polls `getUpdates` (`allowed_updates=["callback_query"]`, plus `"message"` when `updates.commands.enabled`) through a dedicated keep-alive HTTP client; each callback/message is handled synchronously under a 15s `HandleTimeout` so a stuck AM/Telegram call cannot stall the loop. Offset is in-memory → delivery is at-least-once.
 - `server.CallbackHandler` (callback.go) validates chat/user allowlists and the `ButtonTracker` window, resolves labels (AM API → `alertmanager.LabelCache` fallback, hit/miss metered), creates the silence. Matcher scope comes from `updates.silence_matchers` (empty = all labels; zero matchers after filtering → refuse). After success the keyboard is replaced with an `↩️ Undo` button (action `u`, silence ID in the second callback field) tracked by a separate `UndoTracker` with TTL `updates.undo_window` (0 disables); pressing it calls `DeleteSilence`. `answer()` runs on a context detached from the handle budget so the user always gets feedback.
 - `server.ButtonTracker` + sweeper (button_tracker.go): in-memory TTL registry of messages with live buttons; restart invalidates old buttons (strict policy).
+- `server.MessageHandler` (message.go) + `server.StatusReporter` (status.go): read-only chat-ops, gated by `updates.commands.enabled` (requires `updates.enabled`). Only `/status` (version, uptime, readiness, cache sizes via `SizeStat` closures wired in `main.go`); same chat/user allowlists as callbacks; unknown commands and non-allowlisted chats are ignored silently. Metric `alertly_commands_received_total{command,status}` (unknown commands → `command="unknown"`).
 - `internal/alertmanager.client` retries network errors, 429 and 5xx up to 3 attempts with linear backoff (300ms step); 4xx is terminal. A duplicate silence from a retried POST is harmless (identical matchers).
 - `alertmanager.LabelCache` is a TTL+FIFO map with O(1) eviction (`container/list`).
 
@@ -106,7 +107,7 @@ Required env: `TELEGRAM_BOT_TOKEN`, `WEBHOOK_AUTH_TOKEN`. Optional: `ALERTLY_CON
 
 ### Metrics
 
-All in `internal/metrics`. Custom registry (no default Go process collectors except those explicitly registered: `NewGoCollector`, `NewProcessCollector`). `Init()` is idempotent via `sync.Once`. Names: `alertly_notifications_{received,sent}_total`, `alertly_telegram_{api_duration_seconds,retries_total,rate_limited_total}` (the `retries_total` reason `deadline_skip` marks aborted retries), `alertly_template_render_errors_total`, `alertly_message_split_total`, `alertly_auth_failures_total`, `alertly_source_parse_duration_seconds`, `alertly_dedup_skipped_total`, `alertly_callbacks_received_total`, `alertly_silences_created_total`, `alertly_updates_poll_errors_total`, `alertly_label_cache_lookups_total`, `alertly_build_info`. Cache sizes are exposed as on-scrape gauges (`alertly_{dedup_cache,button_tracker,label_cache}_entries`) registered from `main.go` via `metrics.RegisterSizeGauge`.
+All in `internal/metrics`. Custom registry (no default Go process collectors except those explicitly registered: `NewGoCollector`, `NewProcessCollector`). `Init()` is idempotent via `sync.Once`. Names: `alertly_notifications_{received,sent}_total`, `alertly_telegram_{api_duration_seconds,retries_total,rate_limited_total}` (the `retries_total` reason `deadline_skip` marks aborted retries), `alertly_template_render_errors_total`, `alertly_message_split_total`, `alertly_auth_failures_total`, `alertly_source_parse_duration_seconds`, `alertly_dedup_skipped_total`, `alertly_callbacks_received_total`, `alertly_commands_received_total`, `alertly_silences_created_total`, `alertly_updates_poll_errors_total`, `alertly_label_cache_lookups_total`, `alertly_build_info`. Cache sizes are exposed as on-scrape gauges (`alertly_{dedup_cache,button_tracker,label_cache}_entries`) registered from `main.go` via `metrics.RegisterSizeGauge`.
 
 ## Repo conventions
 

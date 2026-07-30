@@ -1,0 +1,17 @@
+# Minimal quick-start values for the alertly Helm chart.
+#
+#   helm repo add alertly https://maksimrudakov.github.io/alertly
+#   helm install alertly alertly/alertly -n monitoring -f values-minimal.yaml
+#
+# Everything not listed here keeps the chart defaults (hardened securityContext,
+# probes, resources, ClusterIP service, dedup enabled with 1h TTL).
+#
+# WARNING: secret.create=true stores tokens in Helm release history — fine for
+# a first try, use external-secrets/sealed-secrets with secret.create=false in
+# production (see charts/alertly/values.yaml).
+
+secret:
+  create: true
+  values:
+    telegramBotToken: "<TELEGRAM_BOT_TOKEN>"
+    webhookAuthToken: "<WEBHOOK_AUTH_TOKEN>"

@@ -110,6 +110,76 @@ func TestUpdatesPoller_DispatchesCallback(t *testing.T) {
 	}
 }
 
+func TestUpdatesPoller_DispatchesCommandMessage(t *testing.T) {
+	var getUpdatesCalls atomic.Int32
+	var sendCalls atomic.Int32
+
+	tgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			if getUpdatesCalls.Add(1) == 1 {
+				_, _ = io.WriteString(w, `{"ok":true,"result":[{"update_id":1,"message":{"message_id":9,"chat":{"id":-100},"from":{"id":42,"username":"bob"},"text":"/status"}}]}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"result":[]}`)
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			sendCalls.Add(1)
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":100}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer tgSrv.Close()
+
+	limiter := telegram.NewLimiter(1000, 1000)
+	tg := telegram.New(telegram.Config{
+		APIURL:         tgSrv.URL,
+		Token:          "t",
+		RequestTimeout: 2 * time.Second,
+		MaxAttempts:    1,
+	}, limiter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	readiness := NewReadiness()
+	readiness.MarkReady()
+	msgHandler := NewMessageHandler(CommandDeps{
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Telegram:      tg,
+		ChatAllowlist: []int64{-100},
+		Status: &StatusReporter{
+			StartedAt: time.Now(),
+			Version:   "test",
+			Commit:    "abc",
+			Readiness: readiness,
+		},
+	})
+
+	poller := &UpdatesPoller{
+		Client:      tg,
+		Handler:     NewCallbackHandler(CallbackDeps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Telegram: tg}),
+		Messages:    msgHandler,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PollTimeout: 100 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { poller.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if sendCalls.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if sendCalls.Load() != 1 {
+		t.Fatalf("expected exactly 1 status reply, got %d", sendCalls.Load())
+	}
+}
+
 func TestUpdatesPoller_ShutdownOnCtxCancel(t *testing.T) {
 	tgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate slow poll; return empty after 50ms so the poller can loop.

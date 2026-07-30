@@ -161,3 +161,19 @@ func TestValidate_SilenceMatchersAndUndoWindow(t *testing.T) {
 		t.Errorf("valid config rejected: %v", err)
 	}
 }
+
+func TestValidate_Commands(t *testing.T) {
+	c := Default()
+	c.Updates.Commands.Enabled = true
+	if err := c.Validate(); err == nil {
+		t.Error("commands.enabled without updates.enabled must fail validation")
+	}
+
+	c = Default()
+	c.Updates.Enabled = true
+	c.Alertmanager.URL = "http://am:9093"
+	c.Updates.Commands.Enabled = true
+	if err := c.Validate(); err != nil {
+		t.Errorf("valid commands config rejected: %v", err)
+	}
+}

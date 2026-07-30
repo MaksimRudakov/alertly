@@ -40,6 +40,9 @@ type Config struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	DryRun         bool
+	// PollMessages adds "message" to getUpdates allowed_updates so chat-ops
+	// commands reach the poller. Off unless updates.commands.enabled.
+	PollMessages bool
 }
 
 type client struct {

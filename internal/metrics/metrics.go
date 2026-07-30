@@ -23,6 +23,7 @@ var (
 	SourceParseDuration   *prometheus.HistogramVec
 	BuildInfo             *prometheus.GaugeVec
 	CallbacksReceived     *prometheus.CounterVec
+	CommandsReceived      *prometheus.CounterVec
 	SilencesCreated       *prometheus.CounterVec
 	SilencesDeleted       *prometheus.CounterVec
 	UpdatesPollErrors     *prometheus.CounterVec
@@ -91,6 +92,11 @@ func Init() *prometheus.Registry {
 			Help: "Number of Telegram callback_query events handled per action and outcome.",
 		}, []string{"action", "status"})
 
+		CommandsReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_commands_received_total",
+			Help: "Number of chat-ops commands handled per command and outcome. Unknown commands are labelled command=\"unknown\".",
+		}, []string{"command", "status"})
+
 		SilencesCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_silences_created_total",
 			Help: "Number of Alertmanager silences created via callback, per outcome.",
@@ -128,6 +134,7 @@ func Init() *prometheus.Registry {
 			SourceParseDuration,
 			BuildInfo,
 			CallbacksReceived,
+			CommandsReceived,
 			SilencesCreated,
 			SilencesDeleted,
 			UpdatesPollErrors,

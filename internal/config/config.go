@@ -79,6 +79,13 @@ type Updates struct {
 	// silence is created (silence is deleted via the AM API on press).
 	// 0 disables undo. Allowed range: 0..1h.
 	UndoWindow time.Duration `yaml:"undo_window"`
+	// Commands enables read-only chat-ops commands (/status) over the same
+	// long-poll loop and allowlists as the silence buttons.
+	Commands Commands `yaml:"commands"`
+}
+
+type Commands struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 const (
@@ -142,6 +149,7 @@ func Default() Config {
 			ButtonTTL:        8 * time.Hour,
 			SilenceMatchers:  nil,
 			UndoWindow:       5 * time.Minute,
+			Commands:         Commands{Enabled: false},
 		},
 		Alertmanager: Alertmanager{
 			URL:            "",
@@ -258,6 +266,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("updates.undo_window must be within 0..%s, got %s",
 				UndoWindowMax, c.Updates.UndoWindow)
 		}
+	}
+	if c.Updates.Commands.Enabled && !c.Updates.Enabled {
+		return errors.New("updates.commands.enabled requires updates.enabled")
 	}
 	if c.Dedup.Enabled && c.Dedup.TTL <= 0 {
 		return errors.New("dedup.ttl must be > 0 when dedup.enabled is true")

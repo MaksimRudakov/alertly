@@ -31,8 +31,15 @@ type Chat struct {
 }
 
 type Message struct {
-	MessageID int64 `json:"message_id"`
-	Chat      Chat  `json:"chat"`
+	MessageID int64  `json:"message_id"`
+	Chat      Chat   `json:"chat"`
+	From      *User  `json:"from,omitempty"`
+	Text      string `json:"text,omitempty"`
+	// MessageThreadID + IsTopicMessage identify a forum-topic message; replies
+	// must go back into the same thread only when IsTopicMessage is set (the
+	// field is also populated for plain reply chains in regular groups).
+	MessageThreadID *int `json:"message_thread_id,omitempty"`
+	IsTopicMessage  bool `json:"is_topic_message,omitempty"`
 }
 
 type CallbackQuery struct {
@@ -45,6 +52,7 @@ type CallbackQuery struct {
 type Update struct {
 	UpdateID      int64          `json:"update_id"`
 	CallbackQuery *CallbackQuery `json:"callback_query,omitempty"`
+	Message       *Message       `json:"message,omitempty"`
 }
 
 type getUpdatesRequest struct {
@@ -82,10 +90,14 @@ func (c *client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 		ctx, cancel = context.WithTimeout(ctx, timeout+c.cfg.RequestTimeout)
 		defer cancel()
 	}
+	allowed := []string{"callback_query"}
+	if c.cfg.PollMessages {
+		allowed = append(allowed, "message")
+	}
 	req := getUpdatesRequest{
 		Offset:         offset,
 		Timeout:        int(timeout.Seconds()),
-		AllowedUpdates: []string{"callback_query"},
+		AllowedUpdates: allowed,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

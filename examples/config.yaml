@@ -68,6 +68,11 @@ updates:
   # created (pressing it deletes the silence via the AM API). 0 disables undo.
   # Allowed range: 0..1h.
   undo_window: 5m
+  # commands: read-only chat-ops commands over the same long-poll loop and
+  # allowlists. Currently only /status (uptime, readiness, cache sizes).
+  # Register the command in BotFather (/setcommands) for autocompletion.
+  commands:
+    enabled: false
 
 alertmanager:
   url: ""                 # e.g. http://alertmanager.monitoring.svc:9093
