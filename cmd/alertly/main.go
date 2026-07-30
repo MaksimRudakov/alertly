@@ -68,6 +68,7 @@ func run() error {
 		InitialBackoff: cfg.Telegram.Retry.InitialBackoff,
 		MaxBackoff:     cfg.Telegram.Retry.MaxBackoff,
 		DryRun:         dryRun,
+		PollMessages:   cfg.Updates.Enabled && cfg.Updates.Commands.Enabled,
 	}, limiter, logger)
 
 	renderer, err := tmpl.New(cfg.Templates)
@@ -89,6 +90,16 @@ func run() error {
 		logger.Info("dedup enabled", "ttl", cfg.Dedup.TTL)
 	}
 
+	status := &server.StatusReporter{
+		StartedAt: time.Now(),
+		Version:   version.Version,
+		Commit:    version.Commit,
+		Readiness: readiness,
+	}
+	if dedupCache != nil {
+		status.Sizes = append(status.Sizes, server.SizeStat{Label: "Dedup cache", Len: dedupCache.Len})
+	}
+
 	var (
 		keyboard   server.KeyboardBuilder
 		trackerReg server.ButtonRegistrar
@@ -99,7 +110,7 @@ func run() error {
 			logger.Warn("updates.enabled=true ignored under DRY_RUN")
 		} else {
 			var err error
-			keyboard, trackerReg, bgWorkers, err = setupUpdates(cfg, tgClient, logger)
+			keyboard, trackerReg, bgWorkers, err = setupUpdates(cfg, tgClient, logger, status)
 			if err != nil {
 				return fmt.Errorf("updates: %w", err)
 			}
@@ -167,7 +178,7 @@ func run() error {
 	return err
 }
 
-func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logger) (server.KeyboardBuilder, server.ButtonRegistrar, []func(context.Context), error) {
+func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logger, status *server.StatusReporter) (server.KeyboardBuilder, server.ButtonRegistrar, []func(context.Context), error) {
 	amCfg := alertmanager.Config{
 		URL:            cfg.Alertmanager.URL,
 		RequestTimeout: cfg.Alertmanager.RequestTimeout,
@@ -222,9 +233,29 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		Logger:        logger,
 	}
 
+	status.Sizes = append(status.Sizes,
+		server.SizeStat{Label: "Silence buttons", Len: tracker.Len},
+		server.SizeStat{Label: "Label cache", Len: cache.Len},
+	)
+	if undoTracker != nil {
+		status.Sizes = append(status.Sizes, server.SizeStat{Label: "Undo buttons", Len: undoTracker.Len})
+	}
+
+	var msgHandler *server.MessageHandler
+	if cfg.Updates.Commands.Enabled {
+		msgHandler = server.NewMessageHandler(server.CommandDeps{
+			Logger:        logger,
+			Telegram:      tgClient,
+			ChatAllowlist: cfg.Updates.ChatAllowlist,
+			UserAllowlist: cfg.Updates.UserAllowlist,
+			Status:        status,
+		})
+	}
+
 	poller := &server.UpdatesPoller{
 		Client:      tgClient,
 		Handler:     handler,
+		Messages:    msgHandler,
 		Logger:      logger,
 		PollTimeout: cfg.Updates.PollTimeout,
 	}
@@ -254,6 +285,7 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		"button_ttl", cfg.Updates.ButtonTTL,
 		"silence_matchers", cfg.Updates.SilenceMatchers,
 		"undo_window", cfg.Updates.UndoWindow,
+		"commands_enabled", cfg.Updates.Commands.Enabled,
 		"alertmanager_url", cfg.Alertmanager.URL,
 	)
 	return keyboard, tracker, workers, nil

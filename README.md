@@ -12,6 +12,7 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 
 - Sources: Alertmanager (v4 webhook), Kubewatch (new + legacy payload), and a **generic JSON contract** for anything else (GitLab CI, Jira automation, ArgoCD notifications, scripts).
 - **Interactive Silence buttons** on firing Alertmanager alerts: inline keyboard via Telegram long polling, silences created through the Alertmanager API v2 (matcher scope configurable), **↩️ Undo** window after each silence, chat/user allowlists, TTL-limited buttons. Off by default (`updates.enabled`).
+- **Chat-ops `/status`**: read-only self-health command in allowlisted chats (uptime, readiness, cache sizes). Off by default (`updates.commands.enabled`).
 - Multiple chats and topic threads per webhook URL: `/v1/alertmanager/-100123,-100456:42`.
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
 - **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
@@ -212,6 +213,22 @@ Operational notes:
 - Callback processing is bounded (15s per press) and transient Alertmanager errors are retried; delivery of callbacks is at-least-once, so in a narrow crash window a silence can be created twice — duplicates are harmless (identical matchers).
 - Labels are resolved via the AM API with an in-process fallback cache, so resolving works even when AM has already dropped the alert.
 
+## Chat-ops commands
+
+With `updates.commands.enabled: true` (requires `updates.enabled`) the same long-poll loop also answers read-only commands in allowlisted chats:
+
+```yaml
+updates:
+  enabled: true
+  chat_allowlist: [-1001234567890]
+  commands:
+    enabled: true
+```
+
+- `/status` — alertly self-health: version, uptime, readiness (with reason when unready), time of the last Telegram check and in-memory cache sizes (dedup, silence/undo buttons, label cache). Lets on-call verify «is the monitoring pipeline alive» without opening Grafana or `/metrics`.
+
+Access control is the same as for silence buttons: `chat_allowlist` (required) + optional `user_allowlist`. Unknown commands and non-allowlisted chats are ignored silently — the bot does not reply to unrelated group chatter or commands addressed to other bots. Register the command in [@BotFather](https://t.me/BotFather) via `/setcommands` (`status - alertly self-health`) to get autocompletion in the chat.
+
 ## Generic webhook source
 
 `POST /v1/generic/{chats}` accepts alertly's own JSON contract — a single event object or an array (max 100). Any tool that can POST JSON gets the full pipeline: dedup, message splitting, threads, rate limiting.
@@ -329,6 +346,7 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | `alertly_source_parse_duration_seconds` | histogram | `source` |
 | `alertly_dedup_skipped_total` | counter | `source`, `chat_id`, `status` |
 | `alertly_callbacks_received_total` | counter | `action`, `status` |
+| `alertly_commands_received_total` | counter | `command`, `status` |
 | `alertly_silences_created_total` | counter | `status` |
 | `alertly_silences_deleted_total` | counter | `status` |
 | `alertly_updates_poll_errors_total` | counter | `reason` |

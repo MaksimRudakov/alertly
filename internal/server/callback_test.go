@@ -70,6 +70,7 @@ type fakeTG struct {
 	answers         []answer
 	editedMarkups   []edit
 	editedTexts     []edit
+	sentMessages    []sent
 	sendErr         error
 	answerErr       error
 	editReplyErr    error
@@ -82,6 +83,11 @@ type answer struct {
 	Text      string
 	ShowAlert bool
 }
+type sent struct {
+	ChatID   int64
+	ThreadID *int
+	Text     string
+}
 type edit struct {
 	ChatID    int64
 	MessageID int64
@@ -89,7 +95,10 @@ type edit struct {
 	Markup    *telegram.InlineKeyboardMarkup
 }
 
-func (f *fakeTG) SendMessage(context.Context, int64, *int, string, *telegram.SendOptions) (int64, error) {
+func (f *fakeTG) SendMessage(_ context.Context, chatID int64, threadID *int, text string, _ *telegram.SendOptions) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sentMessages = append(f.sentMessages, sent{ChatID: chatID, ThreadID: threadID, Text: text})
 	return 0, f.sendErr
 }
 func (f *fakeTG) GetMe(context.Context) error { return nil }

@@ -262,6 +262,10 @@ config:
     # -- How long the "Undo silence" button stays after a silence is created
     # (press deletes the silence via the AM API). 0 disables undo. Range 0..1h.
     undo_window: 5m
+    # -- Read-only chat-ops commands (/status) over the same long-poll loop and
+    # allowlists. Register the command in BotFather (/setcommands) for autocompletion.
+    commands:
+      enabled: false
 
   # -- Alertmanager connection for the silence action. Required when updates.enabled=true.
   # Auth is supplied via env: ALERTMANAGER_AUTH_USERNAME + _PASSWORD (basic) or ALERTMANAGER_AUTH_TOKEN (bearer).

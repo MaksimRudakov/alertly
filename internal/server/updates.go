@@ -14,8 +14,11 @@ import (
 // dispatches callback_query events to a CallbackHandler. It exits cleanly
 // on context cancellation.
 type UpdatesPoller struct {
-	Client      telegram.Client
-	Handler     *CallbackHandler
+	Client  telegram.Client
+	Handler *CallbackHandler
+	// Messages handles chat-ops command messages; nil ignores message updates
+	// (they are not requested from Telegram unless commands are enabled).
+	Messages    *MessageHandler
 	Logger      *slog.Logger
 	PollTimeout time.Duration
 	// HandleTimeout bounds processing of a single callback_query; zero means
@@ -77,17 +80,21 @@ func (p *UpdatesPoller) Run(ctx context.Context) {
 			if u.UpdateID >= p.offset {
 				p.offset = u.UpdateID + 1
 			}
-			if u.CallbackQuery == nil {
-				continue
+			switch {
+			case u.CallbackQuery != nil:
+				// Process each callback in the foreground; serialisation gives
+				// predictable ordering without extra locking. The per-callback
+				// timeout keeps one stuck AM/Telegram call from stalling the loop:
+				// without it, EditMessageReplyMarkup would retry with backoff for
+				// minutes on an undeadlined context.
+				hctx, hcancel := context.WithTimeout(ctx, handleTimeout)
+				p.Handler.Handle(hctx, u.CallbackQuery)
+				hcancel()
+			case u.Message != nil && p.Messages != nil:
+				hctx, hcancel := context.WithTimeout(ctx, handleTimeout)
+				p.Messages.Handle(hctx, u.Message)
+				hcancel()
 			}
-			// Process each callback in the foreground; serialisation gives
-			// predictable ordering without extra locking. The per-callback
-			// timeout keeps one stuck AM/Telegram call from stalling the loop:
-			// without it, EditMessageReplyMarkup would retry with backoff for
-			// minutes on an undeadlined context.
-			hctx, hcancel := context.WithTimeout(ctx, handleTimeout)
-			p.Handler.Handle(hctx, u.CallbackQuery)
-			hcancel()
 		}
 	}
 }
