@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-30
+
+Read-only chat-ops (`/status`) and supply-chain/CI hardening. First tagged release since 0.3.0 — the 0.4.0 changelog entry below was merged to `main` but never tagged, so 0.5.0 artifacts are the first to include both feature sets. Backward compatible: commands are off by default.
+
+### Added
+- **`/status` chat-ops command** (`updates.commands.enabled`, requires `updates.enabled`): the long-poll loop additionally requests `message` updates and answers `/status` in allowlisted chats with alertly self-health — version/commit, uptime, readiness (with reason when unready), age of the last Telegram check and in-memory cache sizes (dedup, silence/undo buttons, label cache). Same `chat_allowlist`/`user_allowlist` as silence buttons; unknown commands and non-allowlisted chats are ignored silently; replies follow forum topic threads. New metric: `alertly_commands_received_total{command,status}`.
+- `examples/values-minimal.yaml` — Helm quick-start values.
+
+### Changed
+- Go toolchain 1.26.4 → 1.26.5 and `golang:1.26-alpine` base image digest refreshed (fixes CVE-2026-39822, `os.Root` symlink traversal, HIGH).
+- `release.yaml` workflow: top-level `GITHUB_TOKEN` permissions reduced to `contents: read`, write scopes moved to job level (OpenSSF Scorecard Token-Permissions).
+
 ## [0.4.0] - 2026-07-06
 
 In-chat silence UX round-trip (create → undo, configurable scope) and a generic JSON source for arbitrary senders. Backward compatible: defaults preserve existing behaviour; undo only affects deployments with `updates.enabled=true`.
