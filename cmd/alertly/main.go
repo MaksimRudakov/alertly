@@ -90,11 +90,13 @@ func run() error {
 		logger.Info("dedup enabled", "ttl", cfg.Dedup.TTL)
 	}
 
+	activity := server.NewActivityTracker()
 	status := &server.StatusReporter{
 		StartedAt: time.Now(),
 		Version:   version.Version,
 		Commit:    version.Commit,
 		Readiness: readiness,
+		Activity:  activity,
 	}
 	if dedupCache != nil {
 		status.Sizes = append(status.Sizes, server.SizeStat{Label: "Dedup cache", Len: dedupCache.Len})
@@ -128,6 +130,7 @@ func run() error {
 		Keyboard:  keyboard,
 		Tracker:   trackerReg,
 		Dedup:     dedupCache,
+		Activity:  activity,
 	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -243,6 +246,12 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 
 	var msgHandler *server.MessageHandler
 	if cfg.Updates.Commands.Enabled {
+		status.AM = amClient
+		status.Pipeline = server.PipelineConfig{
+			Enabled:       cfg.Updates.Commands.Status.Pipeline,
+			WatchdogAlert: cfg.Updates.Commands.Status.WatchdogAlert,
+			Timeout:       cfg.Updates.Commands.Status.PipelineTimeout,
+		}
 		msgHandler = server.NewMessageHandler(server.CommandDeps{
 			Logger:        logger,
 			Telegram:      tgClient,
@@ -340,6 +349,7 @@ func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.Readine
 		if ctx.Err() != nil {
 			return
 		}
+		r.Touch()
 
 		var wait time.Duration
 		if err == nil {

@@ -37,6 +37,24 @@ type Client interface {
 	GetAlertLabels(ctx context.Context, fingerprint string) (map[string]string, error)
 	CreateSilence(ctx context.Context, req SilenceRequest) (string, error)
 	DeleteSilence(ctx context.Context, silenceID string) error
+	Status(ctx context.Context) (StatusInfo, error)
+	AlertsOverview(ctx context.Context, watchdogAlert string) (AlertsOverview, error)
+}
+
+// StatusInfo is the subset of GET /api/v2/status used by /status chat-ops.
+type StatusInfo struct {
+	Version       string
+	ClusterStatus string
+}
+
+// AlertsOverview aggregates GET /api/v2/alerts for /status chat-ops: how many
+// alerts AM currently holds and whether the deadman's-switch alert (Watchdog)
+// is present — its absence with a healthy AM points at the Prometheus side.
+type AlertsOverview struct {
+	Firing            int
+	Silenced          int
+	WatchdogSeen      bool
+	WatchdogUpdatedAt time.Time
 }
 
 type Matcher struct {
@@ -61,6 +79,12 @@ type silenceResponse struct {
 type alert struct {
 	Fingerprint string            `json:"fingerprint"`
 	Labels      map[string]string `json:"labels"`
+	Status      alertStatus       `json:"status"`
+	UpdatedAt   time.Time         `json:"updatedAt"`
+}
+
+type alertStatus struct {
+	State string `json:"state"` // active | suppressed | unprocessed
 }
 
 type APIError struct {
@@ -146,12 +170,10 @@ func (c *client) doWithRetry(ctx context.Context, maxBody int64, build func() (*
 	return 0, nil, lastErr
 }
 
-func (c *client) GetAlertLabels(ctx context.Context, fingerprint string) (map[string]string, error) {
-	if fingerprint == "" {
-		return nil, errors.New("fingerprint is empty")
-	}
-	// AM v2 API does not expose fingerprint filter directly; fetch active+silenced
-	// and match client-side. Typical alert volume makes this acceptable.
+// fetchAlerts retrieves active+silenced+inhibited alerts. AM v2 API does not
+// expose a fingerprint filter, so callers match client-side; typical alert
+// volume makes this acceptable.
+func (c *client) fetchAlerts(ctx context.Context) ([]alert, error) {
 	u, err := url.Parse(c.cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse alertmanager url: %w", err)
@@ -182,12 +204,82 @@ func (c *client) GetAlertLabels(ctx context.Context, fingerprint string) (map[st
 	if err := json.Unmarshal(body, &alerts); err != nil {
 		return nil, fmt.Errorf("decode alerts: %w", err)
 	}
+	return alerts, nil
+}
+
+func (c *client) GetAlertLabels(ctx context.Context, fingerprint string) (map[string]string, error) {
+	if fingerprint == "" {
+		return nil, errors.New("fingerprint is empty")
+	}
+	alerts, err := c.fetchAlerts(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for _, a := range alerts {
 		if a.Fingerprint == fingerprint {
 			return a.Labels, nil
 		}
 	}
 	return nil, ErrAlertNotFound
+}
+
+func (c *client) Status(ctx context.Context) (StatusInfo, error) {
+	u, err := url.Parse(c.cfg.URL)
+	if err != nil {
+		return StatusInfo{}, fmt.Errorf("parse alertmanager url: %w", err)
+	}
+	u.Path = joinPath(u.Path, "/api/v2/status")
+
+	status, body, err := c.doWithRetry(ctx, 1<<16, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
+	if err != nil {
+		return StatusInfo{}, fmt.Errorf("alertmanager get status: %w", err)
+	}
+	if status < 200 || status >= 300 {
+		return StatusInfo{}, &APIError{StatusCode: status, Body: string(body)}
+	}
+
+	var sr struct {
+		Cluster struct {
+			Status string `json:"status"`
+		} `json:"cluster"`
+		VersionInfo struct {
+			Version string `json:"version"`
+		} `json:"versionInfo"`
+	}
+	if err := json.Unmarshal(body, &sr); err != nil {
+		return StatusInfo{}, fmt.Errorf("decode status: %w", err)
+	}
+	return StatusInfo{Version: sr.VersionInfo.Version, ClusterStatus: sr.Cluster.Status}, nil
+}
+
+func (c *client) AlertsOverview(ctx context.Context, watchdogAlert string) (AlertsOverview, error) {
+	alerts, err := c.fetchAlerts(ctx)
+	if err != nil {
+		return AlertsOverview{}, err
+	}
+	var ov AlertsOverview
+	for _, a := range alerts {
+		switch a.Status.State {
+		case "suppressed":
+			ov.Silenced++
+		default: // active + unprocessed count as firing
+			ov.Firing++
+		}
+		if watchdogAlert != "" && a.Labels["alertname"] == watchdogAlert {
+			ov.WatchdogSeen = true
+			if a.UpdatedAt.After(ov.WatchdogUpdatedAt) {
+				ov.WatchdogUpdatedAt = a.UpdatedAt
+			}
+		}
+	}
+	return ov, nil
 }
 
 func (c *client) CreateSilence(ctx context.Context, sreq SilenceRequest) (string, error) {

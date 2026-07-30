@@ -85,7 +85,20 @@ type Updates struct {
 }
 
 type Commands struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool          `yaml:"enabled"`
+	Status  StatusCommand `yaml:"status"`
+}
+
+// StatusCommand tunes the /status reply.
+type StatusCommand struct {
+	// Pipeline adds the delivery-pipeline section: AM /api/v2/status, alert
+	// counts, the Watchdog deadman check and last webhook/delivery timestamps.
+	Pipeline bool `yaml:"pipeline"`
+	// WatchdogAlert is the always-firing alert used as a Prometheus deadman's
+	// switch ("Watchdog" in kube-prometheus-stack). Empty disables the check.
+	WatchdogAlert string `yaml:"watchdog_alert"`
+	// PipelineTimeout bounds each AM call made while building the reply.
+	PipelineTimeout time.Duration `yaml:"pipeline_timeout"`
 }
 
 const (
@@ -149,7 +162,14 @@ func Default() Config {
 			ButtonTTL:        8 * time.Hour,
 			SilenceMatchers:  nil,
 			UndoWindow:       5 * time.Minute,
-			Commands:         Commands{Enabled: false},
+			Commands: Commands{
+				Enabled: false,
+				Status: StatusCommand{
+					Pipeline:        true,
+					WatchdogAlert:   "Watchdog",
+					PipelineTimeout: 4 * time.Second,
+				},
+			},
 		},
 		Alertmanager: Alertmanager{
 			URL:            "",
@@ -269,6 +289,9 @@ func (c Config) Validate() error {
 	}
 	if c.Updates.Commands.Enabled && !c.Updates.Enabled {
 		return errors.New("updates.commands.enabled requires updates.enabled")
+	}
+	if c.Updates.Commands.Enabled && c.Updates.Commands.Status.Pipeline && c.Updates.Commands.Status.PipelineTimeout <= 0 {
+		return errors.New("updates.commands.status.pipeline_timeout must be > 0 when the pipeline section is enabled")
 	}
 	if c.Dedup.Enabled && c.Dedup.TTL <= 0 {
 		return errors.New("dedup.ttl must be > 0 when dedup.enabled is true")
