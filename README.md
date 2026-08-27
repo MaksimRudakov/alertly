@@ -17,9 +17,9 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
 - **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
 - **In-process deduplication** by `(fingerprint, chat, status)` with TTL — suppresses duplicate Telegram messages caused by Alertmanager re-sending a webhook it didn't get an ACK for.
-- Message splitting >4096 chars on rune boundaries, HTML-tag aware.
+- Message splitting >4096 UTF-16 units (Telegram's own unit — an emoji counts as two) on paragraph/line/word boundaries; HTML formatting survives the cut: tags open at the boundary are closed and reopened on the next part.
 - `text/template` rendering with helpers (`severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`).
-- Bearer-token webhook auth.
+- Bearer-token webhook auth; optional `telegram.chat_allowlist` restricting which chats webhook URLs may target.
 - Prometheus metrics, structured `slog` JSON logs, `/healthz` + `/readyz` (Telegram getMe + send-failure window).
 - Multi-arch image (amd64, arm64), distroless static, ~10 MB, runs as UID 65532.
 
@@ -56,7 +56,7 @@ helm search repo alertly
 OCI (GitHub Container Registry, no `helm repo add` needed):
 
 ```bash
-helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.4.0
+helm show chart oci://ghcr.io/maksimrudakov/charts/alertly --version 0.6.0
 ```
 
 ### Install
@@ -66,7 +66,7 @@ Quick install with tokens passed directly (fine for a lab / personal cluster —
 ```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.4.0 \
+  --version 0.6.0 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
@@ -76,7 +76,7 @@ Or from OCI:
 ```bash
 helm install alertly oci://ghcr.io/maksimrudakov/charts/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.4.0 \
+  --version 0.6.0 \
   --set secret.values.telegramBotToken=<TOKEN> \
   --set secret.values.webhookAuthToken=<TOKEN>
 ```
@@ -102,7 +102,7 @@ Then install referencing it:
 ```bash
 helm install alertly alertly/alertly \
   --namespace monitoring-system --create-namespace \
-  --version 0.4.0 \
+  --version 0.6.0 \
   --set secret.create=false \
   --set secret.existingSecret=alertly-tokens \
   --set reloader.enabled=true   # optional: auto-restart on Secret/ConfigMap changes
@@ -119,15 +119,15 @@ Both the chart tarball (attached to the GitHub Release) and the OCI chart manife
 cosign verify \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/maksimrudakov/charts/alertly:0.4.0
+  ghcr.io/maksimrudakov/charts/alertly:0.6.0
 
-# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.4.0 release)
+# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.6.0 release)
 cosign verify-blob \
-  --certificate alertly-0.4.0.tgz.pem \
-  --signature alertly-0.4.0.tgz.sig \
+  --certificate alertly-0.6.0.tgz.pem \
+  --signature alertly-0.6.0.tgz.sig \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  alertly-0.4.0.tgz
+  alertly-0.6.0.tgz
 ```
 
 The container image `ghcr.io/maksimrudakov/alertly` is signed the same way.
@@ -225,7 +225,13 @@ updates:
     enabled: true
 ```
 
-- `/status` — alertly self-health: version, uptime, readiness (with reason when unready), time of the last Telegram check and in-memory cache sizes (dedup, silence/undo buttons, label cache). Lets on-call verify «is the monitoring pipeline alive» without opening Grafana or `/metrics`.
+- `/status` — alertly self-health **and delivery-pipeline diagnostics**: version, uptime, readiness (with reason when unready), time of the last Telegram check, cache sizes — plus, with `commands.status.pipeline: true` (default), an Alertmanager/Prometheus section that answers the on-call question *«the chat went quiet — is that AM down, Prometheus down, or genuinely no alerts?»*:
+  - **Alertmanager**: `GET /api/v2/status` — version and cluster state, or an explicit «unreachable» line when AM is down;
+  - **Watchdog deadman check**: the always-firing `Watchdog` alert (kube-prometheus-stack) must be present and fresh in AM — missing or stale (>15m) means the Prometheus → AM half of the pipeline died even though AM itself is up; the alert name is configurable via `commands.status.watchdog_alert` (empty disables);
+  - **Alerts in AM**: firing/silenced counts — «AM holds N firing but the last webhook is old» points at broken routing, «0 firing» means it is genuinely quiet;
+  - **Last webhook / last delivery**: in-memory timestamps of the last parsed webhook (with source) and the last successful Telegram send.
+
+  AM queries are bounded by `commands.status.pipeline_timeout` (default 4s) per call, so a dead AM only delays the reply, never blocks the poller.
 
 Access control is the same as for silence buttons: `chat_allowlist` (required) + optional `user_allowlist`. Unknown commands and non-allowlisted chats are ignored silently — the bot does not reply to unrelated group chatter or commands addressed to other bots. Register the command in [@BotFather](https://t.me/BotFather) via `/setcommands` (`status - alertly self-health`) to get autocompletion in the chat.
 
@@ -364,10 +370,13 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `401 Unauthorized` on every webhook | wrong/missing `Authorization: Bearer` header | check `WEBHOOK_AUTH_TOKEN` matches client config |
+| `403 chat ... is not in telegram.chat_allowlist` | webhook URL targets a chat outside the allowlist | add the chat ID to `telegram.chat_allowlist`, or leave the list empty to allow any chat |
 | `/readyz` stuck on 503 with `telegram getMe failed` | bot token invalid or egress blocked | verify token via `getMe` manually; check NetworkPolicy / firewall to `api.telegram.org:443` |
 | Sends fail with `429 Too Many Requests` | upstream burst > rate limit | already retried with `Retry-After`; tune `telegram.rate_limit.global_per_sec` |
+| `400 too many alerts in one request` | Alertmanager group larger than 100 alerts | set `max_alerts` in the AM webhook config (≤100) or tighten grouping |
 | Template render error in logs | bad `text/template` syntax in config | validate locally; `default` template must always exist |
 | Long messages dropped silently | not split? always check `alertly_message_split_total` | verify `parse_mode` is `HTML` and template doesn't emit unbalanced tags |
+| `207 Multi-Status` with `request deadline reached` in logs | payload larger than what fits in `server.write_timeout` at the configured send rate | raise `server.write_timeout`, raise `telegram.rate_limit.per_chat_per_sec`, or split the payload upstream; the caller's retry is deduped |
 | Same alert delivered to Telegram twice | multiple alertly replicas without sticky routing | run `replicaCount: 1`, or hash the request path to a pod (see [Deduplication › Scaling](#scaling-considerations)) |
 | `alertly_telegram_retries_total{reason="deadline_skip"}` growing | server `WriteTimeout` shorter than worst-case retry budget | raise `server.write_timeout` or lower `telegram.retry.max_backoff`; check Telegram `Retry-After` headers in logs |
 | Silence buttons not shown on alerts | `updates.enabled: false`, chat not in `chat_allowlist`, or alert not `firing` | enable updates, add the chat ID to `updates.chat_allowlist`; buttons are only attached to firing Alertmanager alerts |
@@ -384,8 +393,8 @@ flowchart LR
   H2 --> P
   P --> N[Notification]
   N --> R[Renderer text/template]
-  R --> S[SplitMessage 4096]
-  S --> D{dedup.Reserve<br/>fp|chat|status}
+  R --> S[SplitMessage 4096 UTF-16]
+  S --> D{"dedup.Reserve<br/>fp|chat|status"}
   D -- already seen --> SKIP[skip + metric]
   D -- new --> RL[per-chat + global rate limit]
   RL --> T[Telegram Bot API]

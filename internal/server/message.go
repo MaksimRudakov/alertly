@@ -65,7 +65,7 @@ func (h *MessageHandler) Handle(ctx context.Context, msg *telegram.Message) {
 		return
 	}
 
-	if h.reply(ctx, msg, h.deps.Status.Text(), logger) {
+	if h.reply(ctx, msg, h.deps.Status.Text(ctx), logger) {
 		metrics.CommandsReceived.WithLabelValues(cmd, "ok").Inc()
 		logger.Info("command handled")
 	} else {

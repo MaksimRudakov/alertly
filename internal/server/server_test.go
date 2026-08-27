@@ -565,3 +565,60 @@ func TestServerRunGracefulShutdown(t *testing.T) {
 		t.Fatal("Run did not return within 5s of ctx cancel")
 	}
 }
+
+func TestE2EWebhookChatAllowlist(t *testing.T) {
+	rec := newTelegramRecorder(t)
+
+	registry := prometheus.NewRegistry()
+	metrics.Init()
+	tg := telegram.New(telegram.Config{
+		APIURL:         rec.srv.URL,
+		Token:          "tok",
+		RequestTimeout: 5 * time.Second,
+		MaxAttempts:    1,
+	}, telegram.NewLimiter(1000, 1000), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	renderer, err := tmpl.New(map[string]string{tmpl.DefaultName: `{{ .Title }}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(config.Default().Server, Deps{
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Sources:       map[string]source.Source{"alertmanager": source.NewAlertmanager()},
+		Renderer:      renderer,
+		Telegram:      tg,
+		Readiness:     NewReadiness(),
+		AuthToken:     authToken,
+		Registry:      registry,
+		ChatAllowlist: []int64{-100111},
+	})
+	ts := httptest.NewServer(s.srv.Handler)
+	t.Cleanup(ts.Close)
+
+	payload := loadFixture(t, "alertmanager_firing.json")
+
+	// Allowed chat delivers.
+	resp := doPost(t, ts.URL, "/v1/alertmanager/-100111", payload, nil)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("allowed chat: status = %d, want 200", resp.StatusCode)
+	}
+	if len(rec.Sent()) == 0 {
+		t.Fatal("allowed chat: nothing sent")
+	}
+	rec.Reset()
+
+	// Unknown chat is refused before anything is sent — even when mixed with
+	// an allowed one.
+	resp = doPost(t, ts.URL, "/v1/alertmanager/-100111,-100999", payload, nil)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("blocked chat: status = %d, want 403 (body %s)", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "-100999") {
+		t.Fatalf("error should name the rejected chat: %s", body)
+	}
+	if got := rec.Sent(); len(got) != 0 {
+		t.Fatalf("blocked request must not send anything, sent %d", len(got))
+	}
+}

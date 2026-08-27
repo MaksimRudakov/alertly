@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MaksimRudakov/alertly/internal/alertmanager"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 )
 
@@ -174,4 +175,82 @@ func TestMessageHandlerSendError(t *testing.T) {
 
 	// Must not panic and must not retry beyond the client's own logic.
 	h.Handle(context.Background(), statusMsg(-100, 42))
+}
+
+func pipelineReporter(am *fakeAM) *StatusReporter {
+	r := newStatusReporter()
+	r.AM = am
+	r.Pipeline = PipelineConfig{Enabled: true, WatchdogAlert: "Watchdog", Timeout: time.Second}
+	r.Activity = NewActivityTracker()
+	return r
+}
+
+func TestStatusPipelineHealthy(t *testing.T) {
+	am := &fakeAM{
+		statusInfo: alertmanager.StatusInfo{Version: "0.27.0", ClusterStatus: "ready"},
+		overview: alertmanager.AlertsOverview{
+			Firing: 3, Silenced: 1,
+			WatchdogSeen: true, WatchdogUpdatedAt: time.Now().Add(-30 * time.Second),
+		},
+	}
+	r := pipelineReporter(am)
+	r.Activity.RecordWebhook("alertmanager")
+	r.Activity.RecordDelivery()
+
+	text := r.Text(context.Background())
+	for _, want := range []string{
+		"Alertmanager: ✅ v0.27.0, cluster ready",
+		"Watchdog: ✅ updated 30s ago",
+		"Alerts in AM: 3 firing, 1 silenced",
+		"Last webhook: 0s ago (alertmanager)",
+		"Last delivery: 0s ago",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+}
+
+func TestStatusPipelineAMDown(t *testing.T) {
+	am := &fakeAM{statusErr: errors.New("dial tcp 10.0.0.1:9093: connect: connection refused")}
+	text := pipelineReporter(am).Text(context.Background())
+	if !strings.Contains(text, "Alertmanager: ❌ unreachable") || !strings.Contains(text, "skipped (AM unreachable)") {
+		t.Errorf("expected AM-down diagnostics in:\n%s", text)
+	}
+}
+
+func TestStatusPipelinePrometheusDead(t *testing.T) {
+	// AM alive but no Watchdog — the deadman check must point at Prometheus.
+	am := &fakeAM{
+		statusInfo: alertmanager.StatusInfo{Version: "0.27.0", ClusterStatus: "ready"},
+		overview:   alertmanager.AlertsOverview{Firing: 0, Silenced: 0, WatchdogSeen: false},
+	}
+	text := pipelineReporter(am).Text(context.Background())
+	if !strings.Contains(text, "Watchdog: ❌") || !strings.Contains(text, "check Prometheus") {
+		t.Errorf("expected missing-watchdog diagnostics in:\n%s", text)
+	}
+
+	// Stale Watchdog (AM keeps it, Prometheus stopped refreshing).
+	am.overview = alertmanager.AlertsOverview{
+		WatchdogSeen: true, WatchdogUpdatedAt: time.Now().Add(-30 * time.Minute),
+	}
+	text = pipelineReporter(am).Text(context.Background())
+	if !strings.Contains(text, "Watchdog: ⚠️ stale") {
+		t.Errorf("expected stale-watchdog diagnostics in:\n%s", text)
+	}
+}
+
+func TestStatusPipelineDisabled(t *testing.T) {
+	r := newStatusReporter() // no AM, Pipeline zero-value
+	if strings.Contains(r.Text(context.Background()), "Pipeline") {
+		t.Error("pipeline section must be absent when disabled")
+	}
+}
+
+func TestStatusNeverSeenActivity(t *testing.T) {
+	am := &fakeAM{statusInfo: alertmanager.StatusInfo{Version: "0.27.0"}}
+	text := pipelineReporter(am).Text(context.Background())
+	if !strings.Contains(text, "Last webhook: none since start") || !strings.Contains(text, "Last delivery: none since start") {
+		t.Errorf("expected never-seen activity lines in:\n%s", text)
+	}
 }

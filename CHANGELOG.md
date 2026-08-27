@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+- **`updates.button_tracker_max`** (default 10000) bounds the in-memory silence/undo button trackers with FIFO eviction — previously they grew without limit for the full `button_ttl` (8h default) under a steady stream of firing alerts. An evicted button behaves exactly like the restart case: it stays on screen, a click is rejected and the keyboard stripped.
+- **`server.idle_timeout`** (120s) and **`server.read_header_timeout`** (5s): explicit HTTP server timeouts. Previously both fell back to `read_timeout` (10s), which silently churned Alertmanager's keep-alive connections every 10s of quiet; request headers are now also capped at 64 KiB (down from net/http's 1 MB default).
+- **`telegram.chat_allowlist`** — optional list of chat IDs webhook URLs may target. Empty (default) keeps the current any-chat behaviour; non-empty rejects requests naming other chats with `403` before anything is sent. Since per-chat metric labels and rate-limiter state are keyed by whatever chat IDs callers put in the URL, the allowlist also bounds both.
+- **Alertmanager payloads are capped at 100 alerts per request** (mirroring the generic source's existing cap): a larger group is rejected with `400` instead of fanning out into a message flood. Point Alertmanager's webhook `max_alerts` at or below the cap.
+
+### Security
+- Go toolchain 1.26.5 → 1.26.6 and `golang:1.26-alpine` base image digest refreshed: fixes the HIGH stdlib CVEs Trivy flags in the 1.26.5 image (CVE-2026-56853 net/http, CVE-2026-56858 html/template, CVE-2026-56859 encoding/xml, CVE-2026-56860 net/url, CVE-2026-56862 crypto/tls, plus the vendored x/net CVE-2026-39821/CVE-2026-46600).
+- **Bot token no longer reaches the logs.** Telegram authenticates by carrying the token in the request path, and `net/http` puts the full URL into `*url.Error` — so every network-level failure (`http call: Post "https://api.telegram.org/bot<token>/sendMessage": dial tcp …`) printed the bot credentials into the `telegram retry` and `send failed` log lines. Transport errors from the Telegram client and the updates poller are now scrubbed (`<redacted>`) before they are logged or returned, while `errors.Is`/`errors.As` still reach the original error.
+
+### Fixed
+- **Deadline-aware retry actually has a deadline now.** `http.Server.WriteTimeout` only arms a socket write deadline; it never reaches `r.Context()`, so `ctx.Deadline()` in the Telegram client always reported «no deadline» in production and the retry abort (and its `alertly_telegram_retries_total{reason="deadline_skip"}` counter) could never fire. Webhook routes now carry an explicit request budget of `server.write_timeout - 1s`. When that budget runs out mid-payload the handler stops attempting further notifications, logs `request deadline reached`, and answers `207` instead of `200`/`204` so the caller retries what was not attempted (dedup keeps the retry from duplicating what already landed).
+- **Split messages keep their HTML formatting.** A message longer than the limit was cut without regard for open tags, so a part could end inside `<b>…` and Telegram rejected it with `can't parse entities: Unclosed start tag`. Tags open at a cut are now closed at the end of the part and reopened verbatim (attributes included) at the start of the next one.
+- **Message length is measured in UTF-16 code units**, the unit Telegram itself counts, instead of runes. A message of 4096 emoji is 8192 units and was previously sent unsplit, drawing `message is too long`. Surrogate pairs are never cut in half.
+- **The rate limiter now covers every chat-addressed API call and every retry attempt.** `editMessageText`/`editMessageReplyMarkup` (keyboard strips, sweeper passes) and `answerCallbackQuery` went straight to the API — one sweep over a pile of expired buttons was an unthrottled burst; and retries inside a single send bypassed the quota taken once up front. The limiter wait now happens per attempt inside the retry loop; edits consume global + per-chat quota, callback answers global only. `getMe` (health probe) and `getUpdates` (long poll) stay unlimited.
+- **A caller-supplied `X-Request-Id` is validated** (`[A-Za-z0-9._-]`, max 64 chars) before being echoed into logs and the response header; anything else is replaced with a generated UUID, so a client cannot inject structured-log noise or terminal escapes through the header.
+- **A panic in a callback/command handler no longer kills the process.** The updates poller runs outside the HTTP stack, so `recoverMiddleware` never covered it; a panicking handler is now logged with its stack and the poll loop continues.
+
+## [0.6.0] - 2026-07-30
+
+`/status` grows delivery-pipeline diagnostics: one command now answers «the alert chat went quiet — is Alertmanager down, is Prometheus down, or is it genuinely quiet?».
+
+### Added
+- **/status pipeline diagnostics** (`updates.commands.status.*`): the reply now includes an Alertmanager section — AM version/cluster state via `GET /api/v2/status`, firing/silenced alert counts, a **Watchdog deadman check** (always-firing alert present and fresh in AM ⇒ Prometheus → AM pipeline alive; name configurable via `watchdog_alert`, stale threshold 15m) and last webhook received / last Telegram delivery timestamps. Distinguishes «AM down», «Prometheus down» and «genuinely quiet» when an alert chat goes silent. Per-call AM budget `pipeline_timeout` (default 4s).
+
+### Fixed
+- `/status` «Last Telegram check» now reflects the most recent getMe probe (previously it froze at the last readiness transition and grew unbounded).
+- `/status` shows the short (8-char) commit hash instead of the full 40 characters.
+
+## [0.5.0] - 2026-07-30
+
+Read-only chat-ops (`/status`) and supply-chain/CI hardening. First tagged release since 0.3.0 — the 0.4.0 changelog entry below was merged to `main` but never tagged, so 0.5.0 artifacts are the first to include both feature sets. Backward compatible: commands are off by default.
+
+### Added
+- **`/status` chat-ops command** (`updates.commands.enabled`, requires `updates.enabled`): the long-poll loop additionally requests `message` updates and answers `/status` in allowlisted chats with alertly self-health — version/commit, uptime, readiness (with reason when unready), age of the last Telegram check and in-memory cache sizes (dedup, silence/undo buttons, label cache). Same `chat_allowlist`/`user_allowlist` as silence buttons; unknown commands and non-allowlisted chats are ignored silently; replies follow forum topic threads. New metric: `alertly_commands_received_total{command,status}`.
+- `examples/values-minimal.yaml` — Helm quick-start values.
+
+### Changed
+- Go toolchain 1.26.4 → 1.26.5 and `golang:1.26-alpine` base image digest refreshed (fixes CVE-2026-39822, `os.Root` symlink traversal, HIGH).
+- `release.yaml` workflow: top-level `GITHUB_TOKEN` permissions reduced to `contents: read`, write scopes moved to job level (OpenSSF Scorecard Token-Permissions).
+
 ## [0.4.0] - 2026-07-06
 
 In-chat silence UX round-trip (create → undo, configurable scope) and a generic JSON source for arbitrary senders. Backward compatible: defaults preserve existing behaviour; undo only affects deployments with `updates.enabled=true`.

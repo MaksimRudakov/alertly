@@ -24,9 +24,12 @@ type webhookDeps struct {
 	readiness    ReadinessTracker
 	maxBodyBytes int64
 	templateName string
-	keyboard     KeyboardBuilder
-	tracker      ButtonRegistrar
-	dedup        *dedup.Cache
+	// chatAllowlist restricts webhook targets; empty = any chat.
+	chatAllowlist []int64
+	keyboard      KeyboardBuilder
+	tracker       ButtonRegistrar
+	dedup         *dedup.Cache
+	activity      *ActivityTracker
 }
 
 // ButtonRegistrar records sent alert messages so the callback handler can
@@ -62,6 +65,16 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "400").Inc()
 			return
 		}
+		if len(d.chatAllowlist) > 0 {
+			for _, target := range targets {
+				if !int64InSet(target.ChatID, d.chatAllowlist) {
+					logger.Warn("chat not in telegram.chat_allowlist", "chat_id", target.ChatID)
+					http.Error(w, fmt.Sprintf("chat %d is not in telegram.chat_allowlist", target.ChatID), http.StatusForbidden)
+					metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "403").Inc()
+					return
+				}
+			}
+		}
 
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, d.maxBodyBytes))
 		if err != nil {
@@ -80,12 +93,21 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "400").Inc()
 			return
 		}
+		d.activity.RecordWebhook(d.source.Name())
 
 		var (
 			totalAttempts int
 			totalErrors   int
+			// deadlineHit marks that the request budget ran out before every
+			// notification was attempted, so the outcome is reported as partial
+			// even when nothing that was attempted failed.
+			deadlineHit bool
 		)
 		for _, n := range notes {
+			if ctx.Err() != nil {
+				deadlineHit = true
+				break
+			}
 			rendered, err := d.renderer.Render(d.templateName, n)
 			if err != nil {
 				logger.Error("render failed", "fingerprint", n.Fingerprint, "err", err)
@@ -101,6 +123,10 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			}
 
 			for _, target := range targets {
+				if ctx.Err() != nil {
+					deadlineHit = true
+					break
+				}
 				dedupKey := dedup.Key(n.Fingerprint, target.ChatID, target.ThreadID, n.Status)
 				if d.dedup.Reserve(dedupKey) {
 					metrics.DedupSkipped.WithLabelValues(d.source.Name(),
@@ -152,6 +178,17 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 					d.dedup.Forget(dedupKey)
 				}
 			}
+			if deadlineHit {
+				break
+			}
+		}
+
+		if deadlineHit {
+			logger.Warn("request deadline reached; remaining notifications not attempted",
+				"attempts", totalAttempts,
+				"errors", totalErrors,
+				"notifications", len(notes),
+			)
 		}
 
 		var status int
@@ -164,6 +201,15 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			status = http.StatusMultiStatus
 		default:
 			status = http.StatusInternalServerError
+		}
+		if deadlineHit {
+			// Part of the payload was never attempted: never answer 200/204,
+			// so the caller knows to retry (dedup keeps the retry from
+			// duplicating whatever already landed).
+			switch status {
+			case http.StatusOK, http.StatusNoContent:
+				status = http.StatusMultiStatus
+			}
 		}
 
 		metrics.NotificationsReceived.WithLabelValues(d.source.Name(), strconv.Itoa(status)).Inc()
@@ -178,6 +224,7 @@ func (d webhookDeps) send(ctx context.Context, target notification.ChatTarget, t
 	messageID, err := d.tg.SendMessage(ctx, target.ChatID, target.ThreadID, text, opts)
 	if err == nil {
 		d.readiness.RecordSendSuccess()
+		d.activity.RecordDelivery()
 		return messageID, nil
 	}
 	d.readiness.RecordSendFailure(isServerError(err))

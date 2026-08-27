@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -67,7 +68,7 @@ func TestUpdatesPoller_DispatchesCallback(t *testing.T) {
 
 	am := alertmanager.New(alertmanager.Config{URL: amSrv.URL, RequestTimeout: 2 * time.Second})
 	cache := alertmanager.NewLabelCache(time.Hour, 10)
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	// Register the message that the fake Telegram server sends in the callback.
 	tracker.Register(-100, 7, "fp1")
 	handler := NewCallbackHandler(CallbackDeps{
@@ -249,7 +250,7 @@ func TestUpdatesPoller_HandleTimeoutUnblocksLoop(t *testing.T) {
 	tg := telegram.New(telegram.Config{APIURL: tgSrv.URL, Token: "t", RequestTimeout: 2 * time.Second, MaxAttempts: 1},
 		telegram.NewLimiter(1000, 1000), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	am := alertmanager.New(alertmanager.Config{URL: amSrv.URL, RequestTimeout: 30 * time.Second})
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	tracker.Register(-100, 7, "fp1")
 	handler := NewCallbackHandler(CallbackDeps{
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -287,5 +288,72 @@ func TestUpdatesPoller_HandleTimeoutUnblocksLoop(t *testing.T) {
 	}
 	if answerCalls.Load() < 1 {
 		t.Error("user never got an answer for the timed-out callback")
+	}
+}
+
+func TestDispatchRecoversPanic(t *testing.T) {
+	var logs bytes.Buffer
+	p := &UpdatesPoller{Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+
+	p.dispatch(context.Background(), time.Second, 7, func(context.Context) {
+		panic("boom")
+	})
+
+	if !strings.Contains(logs.String(), "panic in update handler recovered") {
+		t.Fatalf("panic not logged: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "boom") {
+		t.Fatalf("panic value missing from log: %s", logs.String())
+	}
+}
+
+func TestUpdatesPoller_SurvivesPanickingHandler(t *testing.T) {
+	var getUpdatesCalls atomic.Int32
+	tgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			if getUpdatesCalls.Add(1) == 1 {
+				_, _ = io.WriteString(w, `{"ok":true,"result":[{"update_id":1,"callback_query":{"id":"cb1","from":{"id":42},"message":{"message_id":7,"chat":{"id":-100}},"data":"s|fp1|1h"}}]}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"result":[]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer tgSrv.Close()
+
+	tg := telegram.New(telegram.Config{
+		APIURL:         tgSrv.URL,
+		Token:          "t",
+		RequestTimeout: 2 * time.Second,
+		MaxAttempts:    1,
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// A nil CallbackHandler panics on the first dereference inside Handle —
+	// exactly the class of failure the guard must absorb.
+	poller := &UpdatesPoller{
+		Client:      tg,
+		Handler:     nil,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PollTimeout: 50 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { poller.Run(ctx); close(done) }()
+
+	// The loop must keep polling after the panicking update.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if getUpdatesCalls.Load() >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got := getUpdatesCalls.Load(); got < 3 {
+		t.Fatalf("poller died after panic: only %d polls", got)
 	}
 }

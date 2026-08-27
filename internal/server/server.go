@@ -19,6 +19,10 @@ import (
 	tmpl "github.com/MaksimRudakov/alertly/internal/template"
 )
 
+// maxHeaderBytes caps request headers. Webhook clients send a bearer token
+// and little else; net/http's 1 MB default is far more than needed.
+const maxHeaderBytes = 64 << 10
+
 type Server struct {
 	cfg       config.Server
 	logger    *slog.Logger
@@ -34,9 +38,13 @@ type Deps struct {
 	Readiness ReadinessTracker
 	AuthToken string
 	Registry  *prometheus.Registry
-	Keyboard  KeyboardBuilder
-	Tracker   ButtonRegistrar
-	Dedup     *dedup.Cache
+	// ChatAllowlist restricts which chat IDs webhook URLs may target
+	// (telegram.chat_allowlist). Empty = any chat.
+	ChatAllowlist []int64
+	Keyboard      KeyboardBuilder
+	Tracker       ButtonRegistrar
+	Dedup         *dedup.Cache
+	Activity      *ActivityTracker
 }
 
 func New(cfg config.Server, deps Deps) *Server {
@@ -52,20 +60,23 @@ func New(cfg config.Server, deps Deps) *Server {
 	mux.Handle("GET /metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{Registry: deps.Registry}))
 
 	auth := authMiddleware(deps.AuthToken)
+	withDeadline := requestTimeoutMiddleware(cfg.WriteTimeout)
 
 	for name, src := range deps.Sources {
 		h := webhookHandler(webhookDeps{
-			source:       src,
-			renderer:     deps.Renderer,
-			tg:           deps.Telegram,
-			readiness:    deps.Readiness,
-			maxBodyBytes: cfg.MaxBodyBytes,
-			templateName: name,
-			keyboard:     deps.Keyboard,
-			tracker:      deps.Tracker,
-			dedup:        deps.Dedup,
+			source:        src,
+			renderer:      deps.Renderer,
+			tg:            deps.Telegram,
+			readiness:     deps.Readiness,
+			maxBodyBytes:  cfg.MaxBodyBytes,
+			templateName:  name,
+			chatAllowlist: deps.ChatAllowlist,
+			keyboard:      deps.Keyboard,
+			tracker:       deps.Tracker,
+			dedup:         deps.Dedup,
+			activity:      deps.Activity,
 		})
-		mux.Handle(fmt.Sprintf("POST /v1/%s/{chats}", name), auth(h))
+		mux.Handle(fmt.Sprintf("POST /v1/%s/{chats}", name), auth(withDeadline(h)))
 	}
 
 	root := chain(mux,
@@ -79,10 +90,13 @@ func New(cfg config.Server, deps Deps) *Server {
 		logger:    deps.Logger,
 		readiness: deps.Readiness,
 		srv: &http.Server{
-			Addr:         cfg.ListenAddr,
-			Handler:      root,
-			ReadTimeout:  cfg.ReadTimeout,
-			WriteTimeout: cfg.WriteTimeout,
+			Addr:              cfg.ListenAddr,
+			Handler:           root,
+			ReadTimeout:       cfg.ReadTimeout,
+			WriteTimeout:      cfg.WriteTimeout,
+			IdleTimeout:       cfg.IdleTimeout,
+			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+			MaxHeaderBytes:    maxHeaderBytes,
 		},
 	}
 }

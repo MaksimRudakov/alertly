@@ -90,11 +90,13 @@ func run() error {
 		logger.Info("dedup enabled", "ttl", cfg.Dedup.TTL)
 	}
 
+	activity := server.NewActivityTracker()
 	status := &server.StatusReporter{
 		StartedAt: time.Now(),
 		Version:   version.Version,
 		Commit:    version.Commit,
 		Readiness: readiness,
+		Activity:  activity,
 	}
 	if dedupCache != nil {
 		status.Sizes = append(status.Sizes, server.SizeStat{Label: "Dedup cache", Len: dedupCache.Len})
@@ -118,16 +120,18 @@ func run() error {
 	}
 
 	srv := server.New(cfg.Server, server.Deps{
-		Logger:    logger,
-		Sources:   sources,
-		Renderer:  renderer,
-		Telegram:  tgClient,
-		Readiness: readiness,
-		AuthToken: authToken,
-		Registry:  registry,
-		Keyboard:  keyboard,
-		Tracker:   trackerReg,
-		Dedup:     dedupCache,
+		Logger:        logger,
+		Sources:       sources,
+		Renderer:      renderer,
+		Telegram:      tgClient,
+		Readiness:     readiness,
+		AuthToken:     authToken,
+		Registry:      registry,
+		ChatAllowlist: cfg.Telegram.ChatAllowlist,
+		Keyboard:      keyboard,
+		Tracker:       trackerReg,
+		Dedup:         dedupCache,
+		Activity:      activity,
 	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -191,7 +195,7 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 	amClient := alertmanager.New(amCfg)
 
 	cache := alertmanager.NewLabelCache(cfg.Updates.LabelCacheTTL, cfg.Updates.LabelCacheMax)
-	tracker := server.NewButtonTracker(cfg.Updates.ButtonTTL)
+	tracker := server.NewButtonTracker(cfg.Updates.ButtonTTL, cfg.Updates.ButtonTrackerMax)
 	metrics.RegisterSizeGauge("alertly_label_cache_entries",
 		"Current number of fingerprints in the Alertmanager label cache.", cache.Len)
 	metrics.RegisterSizeGauge("alertly_button_tracker_entries",
@@ -208,7 +212,7 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 
 	var undoTracker *server.ButtonTracker
 	if cfg.Updates.UndoWindow > 0 {
-		undoTracker = server.NewButtonTracker(cfg.Updates.UndoWindow)
+		undoTracker = server.NewButtonTracker(cfg.Updates.UndoWindow, cfg.Updates.ButtonTrackerMax)
 		metrics.RegisterSizeGauge("alertly_undo_tracker_entries",
 			"Current number of messages with an active Undo button.", undoTracker.Len)
 	}
@@ -243,6 +247,12 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 
 	var msgHandler *server.MessageHandler
 	if cfg.Updates.Commands.Enabled {
+		status.AM = amClient
+		status.Pipeline = server.PipelineConfig{
+			Enabled:       cfg.Updates.Commands.Status.Pipeline,
+			WatchdogAlert: cfg.Updates.Commands.Status.WatchdogAlert,
+			Timeout:       cfg.Updates.Commands.Status.PipelineTimeout,
+		}
 		msgHandler = server.NewMessageHandler(server.CommandDeps{
 			Logger:        logger,
 			Telegram:      tgClient,
@@ -340,6 +350,7 @@ func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.Readine
 		if ctx.Err() != nil {
 			return
 		}
+		r.Touch()
 
 		var wait time.Duration
 		if err == nil {

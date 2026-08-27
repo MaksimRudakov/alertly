@@ -15,6 +15,10 @@ type ReadinessTracker interface {
 	RecordSendFailure(serverError bool)
 	IsReady() (bool, string)
 	LastCheck() time.Time
+	// Touch refreshes LastCheck without changing readiness — called by the
+	// health loop on every probe so "last check" reflects probing, not the
+	// last readiness transition.
+	Touch()
 }
 
 type readiness struct {
@@ -78,6 +82,11 @@ func (r *readiness) IsReady() (bool, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.ready, r.reason
+}
+
+func (r *readiness) Touch() {
+	now := time.Now()
+	r.lastCheck.Store(&now)
 }
 
 func (r *readiness) LastCheck() time.Time {

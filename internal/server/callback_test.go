@@ -137,6 +137,24 @@ type fakeAM struct {
 	deletedIDs    []string
 	mu            sync.Mutex
 	getAlertCalls int
+	statusInfo    alertmanager.StatusInfo
+	statusErr     error
+	overview      alertmanager.AlertsOverview
+	overviewErr   error
+}
+
+func (f *fakeAM) Status(context.Context) (alertmanager.StatusInfo, error) {
+	if f.statusErr != nil {
+		return alertmanager.StatusInfo{}, f.statusErr
+	}
+	return f.statusInfo, nil
+}
+
+func (f *fakeAM) AlertsOverview(context.Context, string) (alertmanager.AlertsOverview, error) {
+	if f.overviewErr != nil {
+		return alertmanager.AlertsOverview{}, f.overviewErr
+	}
+	return f.overview, nil
 }
 
 func (f *fakeAM) GetAlertLabels(_ context.Context, fp string) (map[string]string, error) {
@@ -178,7 +196,7 @@ func (f *fakeAM) DeleteSilence(_ context.Context, id string) error {
 func newHandler(tg *fakeTG, am *fakeAM, cache *alertmanager.LabelCache, chats, users []int64) *CallbackHandler {
 	// Tracker keys by (chat_id, message_id); the fingerprint stored here does
 	// not need to match the one in callback_data.
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	tracker.Register(-100, 42, "any")
 	return NewCallbackHandler(CallbackDeps{
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -341,7 +359,7 @@ func TestCallback_ExpiredWindow(t *testing.T) {
 	tg := &fakeTG{}
 	am := &fakeAM{labels: map[string]map[string]string{"fp": {"a": "1"}}}
 	// Build a handler with an empty tracker — simulating expired / unknown message.
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	h := NewCallbackHandler(CallbackDeps{
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Telegram:      tg,
@@ -367,7 +385,7 @@ func TestCallback_ExpiredWindow(t *testing.T) {
 func TestCallback_ConsumeOnSuccess(t *testing.T) {
 	tg := &fakeTG{}
 	am := &fakeAM{labels: map[string]map[string]string{"fp": {"a": "1"}}}
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	tracker.Register(-100, 42, "fp")
 
 	h := NewCallbackHandler(CallbackDeps{
@@ -398,9 +416,9 @@ func TestSilenceCreatedBy(t *testing.T) {
 // --- silence_matchers + undo ------------------------------------------------
 
 func newUndoHandler(tg *fakeTG, am *fakeAM, matchers []string) (*CallbackHandler, *ButtonTracker) {
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	tracker.Register(-100, 42, "any")
-	undo := NewButtonTracker(5 * time.Minute)
+	undo := NewButtonTracker(5*time.Minute, 0)
 	h := NewCallbackHandler(CallbackDeps{
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Telegram:        tg,
@@ -501,7 +519,7 @@ func TestCallback_UndoFlow(t *testing.T) {
 func TestCallback_UndoExpiredWindow(t *testing.T) {
 	tg := &fakeTG{}
 	am := &fakeAM{}
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	h := NewCallbackHandler(CallbackDeps{
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Telegram:      tg,
@@ -510,7 +528,7 @@ func TestCallback_UndoExpiredWindow(t *testing.T) {
 		Tracker:       tracker,
 		ChatAllowlist: []int64{-100},
 		Durations:     map[string]time.Duration{"1h": time.Hour},
-		UndoTracker:   NewButtonTracker(5 * time.Minute), // nothing registered
+		UndoTracker:   NewButtonTracker(5*time.Minute, 0), // nothing registered
 	})
 
 	h.Handle(context.Background(), mkCallback("u|sil-1|-", -100, 1))
