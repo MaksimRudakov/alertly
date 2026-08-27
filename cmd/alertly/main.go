@@ -195,7 +195,7 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 	amClient := alertmanager.New(amCfg)
 
 	cache := alertmanager.NewLabelCache(cfg.Updates.LabelCacheTTL, cfg.Updates.LabelCacheMax)
-	tracker := server.NewButtonTracker(cfg.Updates.ButtonTTL)
+	tracker := server.NewButtonTracker(cfg.Updates.ButtonTTL, cfg.Updates.ButtonTrackerMax)
 	metrics.RegisterSizeGauge("alertly_label_cache_entries",
 		"Current number of fingerprints in the Alertmanager label cache.", cache.Len)
 	metrics.RegisterSizeGauge("alertly_button_tracker_entries",
@@ -212,7 +212,7 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 
 	var undoTracker *server.ButtonTracker
 	if cfg.Updates.UndoWindow > 0 {
-		undoTracker = server.NewButtonTracker(cfg.Updates.UndoWindow)
+		undoTracker = server.NewButtonTracker(cfg.Updates.UndoWindow, cfg.Updates.ButtonTrackerMax)
 		metrics.RegisterSizeGauge("alertly_undo_tracker_entries",
 			"Current number of messages with an active Undo button.", undoTracker.Len)
 	}

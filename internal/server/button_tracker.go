@@ -1,6 +1,7 @@
 package server
 
 import (
+	"container/list"
 	"context"
 	"log/slog"
 	"sync"
@@ -16,56 +17,84 @@ type buttonKey struct {
 }
 
 type buttonEntry struct {
+	Key         buttonKey
 	Fingerprint string
 	ExpiresAt   time.Time
 }
 
 // ButtonTracker tracks alert messages that carry silence buttons and expires
-// them after ButtonTTL. Tracker state is in-memory; an alertly restart causes
-// orphaned buttons to remain on screen, but callbacks for them will be
-// rejected because the tracker will not recognise them (strict policy).
+// them after ButtonTTL. Entries are additionally bounded by maxEntries with
+// FIFO eviction (all entries share one TTL, so insertion order is expiry
+// order); an evicted message behaves exactly like a restart case — the button
+// stays on screen but a click is rejected and the keyboard stripped (strict
+// policy). Tracker state is in-memory; an alertly restart causes orphaned
+// buttons to remain on screen, but callbacks for them will be rejected
+// because the tracker will not recognise them.
 type ButtonTracker struct {
 	mu      sync.Mutex
-	entries map[buttonKey]buttonEntry
+	entries map[buttonKey]*list.Element
+	order   *list.List // front = oldest inserted = first to expire
 	ttl     time.Duration
-	now     func() time.Time
+	// maxEntries bounds the tracker; <= 0 means unbounded.
+	maxEntries int
+	now        func() time.Time
 }
 
-func NewButtonTracker(ttl time.Duration) *ButtonTracker {
+func NewButtonTracker(ttl time.Duration, maxEntries int) *ButtonTracker {
 	return &ButtonTracker{
-		entries: make(map[buttonKey]buttonEntry),
-		ttl:     ttl,
-		now:     time.Now,
+		entries:    make(map[buttonKey]*list.Element),
+		order:      list.New(),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		now:        time.Now,
 	}
 }
 
-// Register records a sent message whose keyboard should live for TTL.
+// Register records a sent message whose keyboard should live for TTL. When the
+// tracker is full the oldest entry is evicted (its keyboard stays on screen;
+// the sweeper never sees it, and a late click gets the strict expired path).
 func (t *ButtonTracker) Register(chatID, messageID int64, fingerprint string) {
 	if t == nil || messageID == 0 {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.entries[buttonKey{ChatID: chatID, MessageID: messageID}] = buttonEntry{
+	key := buttonKey{ChatID: chatID, MessageID: messageID}
+	if el, ok := t.entries[key]; ok {
+		entry := el.Value.(*buttonEntry)
+		entry.Fingerprint = fingerprint
+		entry.ExpiresAt = t.now().Add(t.ttl)
+		t.order.MoveToBack(el)
+		return
+	}
+	t.entries[key] = t.order.PushBack(&buttonEntry{
+		Key:         key,
 		Fingerprint: fingerprint,
 		ExpiresAt:   t.now().Add(t.ttl),
+	})
+	if t.maxEntries > 0 {
+		for t.order.Len() > t.maxEntries {
+			oldest := t.order.Front()
+			t.order.Remove(oldest)
+			delete(t.entries, oldest.Value.(*buttonEntry).Key)
+		}
 	}
 }
 
 // Valid reports whether a message is still within its silence window.
-// Returns false when the tracker is nil, the entry is missing (restart case),
-// or the entry has expired.
+// Returns false when the tracker is nil, the entry is missing (restart or
+// eviction case), or the entry has expired.
 func (t *ButtonTracker) Valid(chatID, messageID int64) bool {
 	if t == nil {
 		return false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	entry, ok := t.entries[buttonKey{ChatID: chatID, MessageID: messageID}]
+	el, ok := t.entries[buttonKey{ChatID: chatID, MessageID: messageID}]
 	if !ok {
 		return false
 	}
-	return t.now().Before(entry.ExpiresAt)
+	return t.now().Before(el.Value.(*buttonEntry).ExpiresAt)
 }
 
 // Consume removes an entry (typically called after a successful silence so the
@@ -77,7 +106,11 @@ func (t *ButtonTracker) Consume(chatID, messageID int64) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.entries, buttonKey{ChatID: chatID, MessageID: messageID})
+	key := buttonKey{ChatID: chatID, MessageID: messageID}
+	if el, ok := t.entries[key]; ok {
+		t.order.Remove(el)
+		delete(t.entries, key)
+	}
 }
 
 // ExpiredEntry is returned from Sweep so callers can edit the corresponding
@@ -88,7 +121,8 @@ type ExpiredEntry struct {
 }
 
 // Sweep pops all entries whose TTL has elapsed and returns them. Callers
-// typically then call EditMessageReplyMarkup(nil) for each.
+// typically then call EditMessageReplyMarkup(nil) for each. Entries expire in
+// insertion order, so the walk stops at the first live entry.
 func (t *ButtonTracker) Sweep() []ExpiredEntry {
 	if t == nil {
 		return nil
@@ -97,12 +131,18 @@ func (t *ButtonTracker) Sweep() []ExpiredEntry {
 	defer t.mu.Unlock()
 	now := t.now()
 	var expired []ExpiredEntry
-	for k, e := range t.entries {
-		if now.Before(e.ExpiresAt) {
-			continue
+	for {
+		front := t.order.Front()
+		if front == nil {
+			break
 		}
-		expired = append(expired, ExpiredEntry(k))
-		delete(t.entries, k)
+		entry := front.Value.(*buttonEntry)
+		if now.Before(entry.ExpiresAt) {
+			break
+		}
+		expired = append(expired, ExpiredEntry(entry.Key))
+		t.order.Remove(front)
+		delete(t.entries, entry.Key)
 	}
 	return expired
 }

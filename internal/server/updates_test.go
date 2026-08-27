@@ -68,7 +68,7 @@ func TestUpdatesPoller_DispatchesCallback(t *testing.T) {
 
 	am := alertmanager.New(alertmanager.Config{URL: amSrv.URL, RequestTimeout: 2 * time.Second})
 	cache := alertmanager.NewLabelCache(time.Hour, 10)
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	// Register the message that the fake Telegram server sends in the callback.
 	tracker.Register(-100, 7, "fp1")
 	handler := NewCallbackHandler(CallbackDeps{
@@ -250,7 +250,7 @@ func TestUpdatesPoller_HandleTimeoutUnblocksLoop(t *testing.T) {
 	tg := telegram.New(telegram.Config{APIURL: tgSrv.URL, Token: "t", RequestTimeout: 2 * time.Second, MaxAttempts: 1},
 		telegram.NewLimiter(1000, 1000), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	am := alertmanager.New(alertmanager.Config{URL: amSrv.URL, RequestTimeout: 30 * time.Second})
-	tracker := NewButtonTracker(time.Hour)
+	tracker := NewButtonTracker(time.Hour, 0)
 	tracker.Register(-100, 7, "fp1")
 	handler := NewCallbackHandler(CallbackDeps{
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
