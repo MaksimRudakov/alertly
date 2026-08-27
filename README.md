@@ -394,7 +394,7 @@ flowchart LR
   P --> N[Notification]
   N --> R[Renderer text/template]
   R --> S[SplitMessage 4096 UTF-16]
-  S --> D{dedup.Reserve<br/>fp|chat|status}
+  S --> D{"dedup.Reserve<br/>fp|chat|status"}
   D -- already seen --> SKIP[skip + metric]
   D -- new --> RL[per-chat + global rate limit]
   RL --> T[Telegram Bot API]
