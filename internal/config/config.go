@@ -40,6 +40,12 @@ type Telegram struct {
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 	RateLimit      RateLimit     `yaml:"rate_limit"`
 	Retry          Retry         `yaml:"retry"`
+	// ChatAllowlist limits which chat IDs webhook URLs may target. Empty
+	// (default) = any chat, preserving previous behaviour. Non-empty rejects
+	// requests naming other chats with 403 before anything is sent — this also
+	// bounds the per-chat metric cardinality and rate-limiter state, since
+	// both are keyed by whatever chat IDs callers put in the URL.
+	ChatAllowlist []int64 `yaml:"chat_allowlist"`
 }
 
 type RateLimit struct {

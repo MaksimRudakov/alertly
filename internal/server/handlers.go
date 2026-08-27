@@ -24,10 +24,12 @@ type webhookDeps struct {
 	readiness    ReadinessTracker
 	maxBodyBytes int64
 	templateName string
-	keyboard     KeyboardBuilder
-	tracker      ButtonRegistrar
-	dedup        *dedup.Cache
-	activity     *ActivityTracker
+	// chatAllowlist restricts webhook targets; empty = any chat.
+	chatAllowlist []int64
+	keyboard      KeyboardBuilder
+	tracker       ButtonRegistrar
+	dedup         *dedup.Cache
+	activity      *ActivityTracker
 }
 
 // ButtonRegistrar records sent alert messages so the callback handler can
@@ -62,6 +64,16 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "400").Inc()
 			return
+		}
+		if len(d.chatAllowlist) > 0 {
+			for _, target := range targets {
+				if !int64InSet(target.ChatID, d.chatAllowlist) {
+					logger.Warn("chat not in telegram.chat_allowlist", "chat_id", target.ChatID)
+					http.Error(w, fmt.Sprintf("chat %d is not in telegram.chat_allowlist", target.ChatID), http.StatusForbidden)
+					metrics.NotificationsReceived.WithLabelValues(d.source.Name(), "403").Inc()
+					return
+				}
+			}
 		}
 
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, d.maxBodyBytes))

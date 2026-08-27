@@ -34,10 +34,13 @@ type Deps struct {
 	Readiness ReadinessTracker
 	AuthToken string
 	Registry  *prometheus.Registry
-	Keyboard  KeyboardBuilder
-	Tracker   ButtonRegistrar
-	Dedup     *dedup.Cache
-	Activity  *ActivityTracker
+	// ChatAllowlist restricts which chat IDs webhook URLs may target
+	// (telegram.chat_allowlist). Empty = any chat.
+	ChatAllowlist []int64
+	Keyboard      KeyboardBuilder
+	Tracker       ButtonRegistrar
+	Dedup         *dedup.Cache
+	Activity      *ActivityTracker
 }
 
 func New(cfg config.Server, deps Deps) *Server {
@@ -57,16 +60,17 @@ func New(cfg config.Server, deps Deps) *Server {
 
 	for name, src := range deps.Sources {
 		h := webhookHandler(webhookDeps{
-			source:       src,
-			renderer:     deps.Renderer,
-			tg:           deps.Telegram,
-			readiness:    deps.Readiness,
-			maxBodyBytes: cfg.MaxBodyBytes,
-			templateName: name,
-			keyboard:     deps.Keyboard,
-			tracker:      deps.Tracker,
-			dedup:        deps.Dedup,
-			activity:     deps.Activity,
+			source:        src,
+			renderer:      deps.Renderer,
+			tg:            deps.Telegram,
+			readiness:     deps.Readiness,
+			maxBodyBytes:  cfg.MaxBodyBytes,
+			templateName:  name,
+			chatAllowlist: deps.ChatAllowlist,
+			keyboard:      deps.Keyboard,
+			tracker:       deps.Tracker,
+			dedup:         deps.Dedup,
+			activity:      deps.Activity,
 		})
 		mux.Handle(fmt.Sprintf("POST /v1/%s/{chats}", name), auth(withDeadline(h)))
 	}

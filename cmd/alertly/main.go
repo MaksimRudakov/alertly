@@ -120,17 +120,18 @@ func run() error {
 	}
 
 	srv := server.New(cfg.Server, server.Deps{
-		Logger:    logger,
-		Sources:   sources,
-		Renderer:  renderer,
-		Telegram:  tgClient,
-		Readiness: readiness,
-		AuthToken: authToken,
-		Registry:  registry,
-		Keyboard:  keyboard,
-		Tracker:   trackerReg,
-		Dedup:     dedupCache,
-		Activity:  activity,
+		Logger:        logger,
+		Sources:       sources,
+		Renderer:      renderer,
+		Telegram:      tgClient,
+		Readiness:     readiness,
+		AuthToken:     authToken,
+		Registry:      registry,
+		ChatAllowlist: cfg.Telegram.ChatAllowlist,
+		Keyboard:      keyboard,
+		Tracker:       trackerReg,
+		Dedup:         dedupCache,
+		Activity:      activity,
 	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

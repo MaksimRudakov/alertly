@@ -9,6 +9,9 @@ telegram:
   api_url: "https://api.telegram.org"
   parse_mode: "HTML"
   request_timeout: 10s
+  # chat_allowlist: chat IDs webhook URLs may target. Empty = any chat.
+  # Non-empty rejects requests naming other chats with 403 before sending.
+  chat_allowlist: []
   rate_limit:
     per_chat_per_sec: 1
     global_per_sec: 30
