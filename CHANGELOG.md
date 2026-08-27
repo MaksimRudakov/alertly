@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - **Alertmanager payloads are capped at 100 alerts per request** (mirroring the generic source's existing cap): a larger group is rejected with `400` instead of fanning out into a message flood. Point Alertmanager's webhook `max_alerts` at or below the cap.
 
 ### Security
+- Go toolchain 1.26.5 → 1.26.6 and `golang:1.26-alpine` base image digest refreshed: fixes the HIGH stdlib CVEs Trivy flags in the 1.26.5 image (CVE-2026-56853 net/http, CVE-2026-56858 html/template, CVE-2026-56859 encoding/xml, CVE-2026-56860 net/url, CVE-2026-56862 crypto/tls, plus the vendored x/net CVE-2026-39821/CVE-2026-46600).
 - **Bot token no longer reaches the logs.** Telegram authenticates by carrying the token in the request path, and `net/http` puts the full URL into `*url.Error` — so every network-level failure (`http call: Post "https://api.telegram.org/bot<token>/sendMessage": dial tcp …`) printed the bot credentials into the `telegram retry` and `send failed` log lines. Transport errors from the Telegram client and the updates poller are now scrubbed (`<redacted>`) before they are logged or returned, while `errors.Is`/`errors.As` still reach the original error.
 
 ### Fixed

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `alertly` — Go HTTP service that ingests webhooks from Alertmanager and Kubewatch and forwards them to Telegram chats. Stdlib-first (`net/http` with `mux.Handle("POST /v1/...{chats}")`), no web framework.
 
 - Module: `github.com/MaksimRudakov/alertly`
-- Go: `1.25` (toolchain `go1.26.5`)
+- Go: `1.25` (toolchain `go1.26.6`)
 - Single binary entry: `cmd/alertly`
 
 Treat README + `examples/config.yaml` + `TODO.md` as the source of truth for current scope. Dedup, interactive silence buttons (Phase 2b), the generic source and the `/status` chat-ops command are shipped; `TODO.md` lists the remaining Phase 2/3 items (label routing, async queue, Markdown, `/alerts` command) that are intentionally deferred until a real signal demands them.
