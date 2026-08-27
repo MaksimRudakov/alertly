@@ -1,15 +1,18 @@
 name: CI
 
+# pull_request only: a push trigger for feature branches would start a second,
+# identical run per push. Cancelling that twin via concurrency is not an option
+# either — the repo's required status checks then see the cancelled run and
+# block the merge. Branches without an open PR get their CI when the PR opens.
 on:
   pull_request:
-  push:
-    branches-ignore: [main]
 
 permissions:
   contents: read
 
+# Superseded pushes to the same PR cancel the older run.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.head_ref }}
   cancel-in-progress: true
 
 jobs:
