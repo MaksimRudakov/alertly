@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/MaksimRudakov/alertly/internal/metrics"
@@ -87,16 +88,36 @@ func (p *UpdatesPoller) Run(ctx context.Context) {
 				// timeout keeps one stuck AM/Telegram call from stalling the loop:
 				// without it, EditMessageReplyMarkup would retry with backoff for
 				// minutes on an undeadlined context.
-				hctx, hcancel := context.WithTimeout(ctx, handleTimeout)
-				p.Handler.Handle(hctx, u.CallbackQuery)
-				hcancel()
+				p.dispatch(ctx, handleTimeout, u.UpdateID, func(hctx context.Context) {
+					p.Handler.Handle(hctx, u.CallbackQuery)
+				})
 			case u.Message != nil && p.Messages != nil:
-				hctx, hcancel := context.WithTimeout(ctx, handleTimeout)
-				p.Messages.Handle(hctx, u.Message)
-				hcancel()
+				p.dispatch(ctx, handleTimeout, u.UpdateID, func(hctx context.Context) {
+					p.Messages.Handle(hctx, u.Message)
+				})
 			}
 		}
 	}
+}
+
+// dispatch runs one update handler under the per-update timeout and a panic
+// guard. Webhook handlers sit behind recoverMiddleware, but the poller runs
+// outside the HTTP stack: without this guard a panic in a callback or command
+// handler would take down the whole process. The offset has already been
+// advanced, so a poisoned update is not re-fetched in a crash loop.
+func (p *UpdatesPoller) dispatch(ctx context.Context, timeout time.Duration, updateID int64, fn func(context.Context)) {
+	hctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	defer func() {
+		if rec := recover(); rec != nil {
+			p.Logger.Error("panic in update handler recovered",
+				"update_id", updateID,
+				"panic", rec,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	fn(hctx)
 }
 
 // callbackHandleTimeout bounds the processing of a single callback_query.

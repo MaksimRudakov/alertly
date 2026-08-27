@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/MaksimRudakov/alertly/internal/metrics"
@@ -112,16 +113,6 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 		return 0, nil
 	}
 
-	if c.limiter != nil {
-		waited, err := c.limiter.Wait(ctx, chatID)
-		if err != nil {
-			return 0, fmt.Errorf("rate limiter wait: %w", err)
-		}
-		if waited > 50*time.Millisecond {
-			metrics.TelegramRateLimited.WithLabelValues(metrics.ChatLabel(chatID)).Inc()
-		}
-	}
-
 	payload := sendMessagePayload{
 		ChatID:                chatID,
 		Text:                  text,
@@ -139,7 +130,7 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 		return 0, fmt.Errorf("marshal sendMessage payload: %w", err)
 	}
 
-	okBody, err := c.callWithRetry(ctx, endpoint, body)
+	okBody, err := c.callWithRetry(ctx, endpoint, body, c.chatWait(chatID))
 	if err != nil {
 		return 0, err
 	}
@@ -148,8 +139,44 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 
 func (c *client) GetMe(ctx context.Context) error {
 	endpoint := c.endpoint("getMe")
-	_, err := c.callWithRetry(ctx, endpoint, nil)
+	// Health probe: deliberately not rate limited so a busy send queue cannot
+	// delay readiness detection.
+	_, err := c.callWithRetry(ctx, endpoint, nil, nil)
 	return err
+}
+
+// chatWait returns a per-attempt limiter wait for calls addressed to a chat:
+// global + per-chat quota, metered when the wait was long enough to matter.
+// Waiting inside the retry loop (not once before it) keeps retries from
+// bypassing the quota — five backoff attempts are five API calls.
+func (c *client) chatWait(chatID int64) func(context.Context) error {
+	if c.limiter == nil {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		waited, err := c.limiter.Wait(ctx, chatID)
+		if err != nil {
+			return fmt.Errorf("rate limiter wait: %w", err)
+		}
+		if waited > 50*time.Millisecond {
+			metrics.TelegramRateLimited.WithLabelValues(metrics.ChatLabel(chatID)).Inc()
+		}
+		return nil
+	}
+}
+
+// globalWait returns a per-attempt limiter wait consuming only the global
+// quota, for calls without a chat (answerCallbackQuery).
+func (c *client) globalWait() func(context.Context) error {
+	if c.limiter == nil {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		if err := c.limiter.WaitGlobal(ctx); err != nil {
+			return fmt.Errorf("rate limiter wait: %w", err)
+		}
+		return nil
+	}
 }
 
 func parseMessageID(body []byte) int64 {
@@ -179,9 +206,14 @@ func (c *client) endpoint(method string) string {
 // caller to retry — and the message to be sent twice.
 const retrySafetyMargin = 500 * time.Millisecond
 
-func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte, wait func(context.Context) error) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < c.cfg.MaxAttempts; attempt++ {
+		if wait != nil {
+			if err := wait(ctx); err != nil {
+				return nil, err
+			}
+		}
 		okBody, err := c.callOnce(ctx, endpoint, body)
 		if err == nil {
 			return okBody, nil
@@ -250,17 +282,19 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) ([]
 		req, err = http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	} else {
 		req, err = http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, c.scrub(fmt.Errorf("build request: %w", err))
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 
 	start := time.Now()
 	resp, err := c.http.Do(req)
 	metrics.TelegramAPIDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
-		return nil, fmt.Errorf("http call: %w", err)
+		return nil, c.scrub(fmt.Errorf("http call: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -269,7 +303,7 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) ([]
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var ar apiResponse
 		if err := json.Unmarshal(respBody, &ar); err == nil && !ar.OK {
-			return nil, &APIError{StatusCode: resp.StatusCode, Body: ar.Description}
+			return nil, c.scrub(&APIError{StatusCode: resp.StatusCode, Body: ar.Description})
 		}
 		return respBody, nil
 	}
@@ -291,7 +325,39 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) ([]
 			}
 		}
 	}
-	return nil, ae
+	return nil, c.scrub(ae)
+}
+
+// redactedToken is what a bot token is replaced with in error strings.
+const redactedToken = "<redacted>"
+
+// scrubbedError hides the bot token in the message while keeping the original
+// error reachable through errors.Is/As.
+type scrubbedError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+func (e *scrubbedError) Unwrap() error { return e.err }
+
+// scrub removes the bot token from an error message. Telegram authenticates by
+// carrying the token in the request path, and net/http puts the full URL into
+// *url.Error — so without this every network failure writes the bot credentials
+// into the logs (and into the webhook caller's error line).
+func (c *client) scrub(err error) error {
+	return scrubToken(err, c.cfg.Token)
+}
+
+func scrubToken(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, token) {
+		return err
+	}
+	return &scrubbedError{msg: strings.ReplaceAll(msg, token, redactedToken), err: err}
 }
 
 // ThreadIDValue renders an optional topic thread ID for structured logging:

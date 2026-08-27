@@ -32,6 +32,13 @@ type Server struct {
 	WriteTimeout    time.Duration `yaml:"write_timeout"`
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 	MaxBodyBytes    int64         `yaml:"max_body_bytes"`
+	// IdleTimeout closes idle keep-alive connections. Kept well above
+	// ReadTimeout (net/http's fallback when unset) so Alertmanager's pooled
+	// connections stay warm between webhook bursts.
+	IdleTimeout time.Duration `yaml:"idle_timeout"`
+	// ReadHeaderTimeout bounds reading the request headers alone, so a
+	// slow-header client is cut off before the full ReadTimeout budget.
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
 }
 
 type Telegram struct {
@@ -40,6 +47,12 @@ type Telegram struct {
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 	RateLimit      RateLimit     `yaml:"rate_limit"`
 	Retry          Retry         `yaml:"retry"`
+	// ChatAllowlist limits which chat IDs webhook URLs may target. Empty
+	// (default) = any chat, preserving previous behaviour. Non-empty rejects
+	// requests naming other chats with 403 before anything is sent — this also
+	// bounds the per-chat metric cardinality and rate-limiter state, since
+	// both are keyed by whatever chat IDs callers put in the URL.
+	ChatAllowlist []int64 `yaml:"chat_allowlist"`
 }
 
 type RateLimit struct {
@@ -70,6 +83,10 @@ type Updates struct {
 	// buttons on an alert message. After this window the sweeper removes the
 	// inline keyboard and late clicks are rejected. Allowed range: 2h..48h.
 	ButtonTTL time.Duration `yaml:"button_ttl"`
+	// ButtonTrackerMax bounds the in-memory button/undo trackers (FIFO
+	// eviction of the oldest entry). An evicted button behaves like the
+	// restart case: it stays on screen, but a click is rejected.
+	ButtonTrackerMax int `yaml:"button_tracker_max"`
 	// SilenceMatchers limits which alert labels become silence matchers.
 	// Empty (default) = all labels: the narrowest silence, matching only this
 	// exact alert instance. Listing e.g. [alertname, namespace] creates a
@@ -124,11 +141,13 @@ type Dedup struct {
 func Default() Config {
 	return Config{
 		Server: Server{
-			ListenAddr:      ":8080",
-			ReadTimeout:     10 * time.Second,
-			WriteTimeout:    30 * time.Second,
-			ShutdownTimeout: 30 * time.Second,
-			MaxBodyBytes:    1 << 20,
+			ListenAddr:        ":8080",
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			ShutdownTimeout:   30 * time.Second,
+			MaxBodyBytes:      1 << 20,
+			IdleTimeout:       120 * time.Second,
+			ReadHeaderTimeout: 5 * time.Second,
 		},
 		Telegram: Telegram{
 			APIURL:         "https://api.telegram.org",
@@ -160,6 +179,7 @@ func Default() Config {
 			LabelCacheTTL:    48 * time.Hour,
 			LabelCacheMax:    10000,
 			ButtonTTL:        8 * time.Hour,
+			ButtonTrackerMax: 10000,
 			SilenceMatchers:  nil,
 			UndoWindow:       5 * time.Minute,
 			Commands: Commands{
@@ -218,6 +238,12 @@ func (c Config) Validate() error {
 	if c.Server.MaxBodyBytes <= 0 {
 		return errors.New("server.max_body_bytes must be > 0")
 	}
+	if c.Server.IdleTimeout <= 0 {
+		return errors.New("server.idle_timeout must be > 0")
+	}
+	if c.Server.ReadHeaderTimeout <= 0 {
+		return errors.New("server.read_header_timeout must be > 0")
+	}
 	if c.Telegram.APIURL == "" {
 		return errors.New("telegram.api_url is required")
 	}
@@ -272,6 +298,9 @@ func (c Config) Validate() error {
 		}
 		if c.Alertmanager.RequestTimeout <= 0 {
 			return errors.New("alertmanager.request_timeout must be > 0 when updates.enabled is true")
+		}
+		if c.Updates.ButtonTrackerMax <= 0 {
+			return errors.New("updates.button_tracker_max must be > 0 when updates.enabled is true")
 		}
 		if c.Updates.ButtonTTL < ButtonTTLMin || c.Updates.ButtonTTL > ButtonTTLMax {
 			return fmt.Errorf("updates.button_ttl must be within %s..%s, got %s",

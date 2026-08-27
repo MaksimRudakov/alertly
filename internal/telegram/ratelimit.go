@@ -42,6 +42,13 @@ func (l *Limiter) Wait(ctx context.Context, chatID int64) (waited time.Duration,
 	return time.Since(start), nil
 }
 
+// WaitGlobal consumes only the global quota. Used for API calls that are not
+// tied to a chat (answerCallbackQuery) but still count against the bot-wide
+// request budget.
+func (l *Limiter) WaitGlobal(ctx context.Context) error {
+	return l.global.Wait(ctx)
+}
+
 func (l *Limiter) chatLimiter(chatID int64) *rate.Limiter {
 	l.perChatMu.Lock()
 	defer l.perChatMu.Unlock()

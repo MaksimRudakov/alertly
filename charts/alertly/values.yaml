@@ -200,10 +200,15 @@ config:
     write_timeout: 30s
     shutdown_timeout: 30s
     max_body_bytes: 1048576
+    idle_timeout: 120s
+    read_header_timeout: 5s
   telegram:
     api_url: "https://api.telegram.org"
     parse_mode: "HTML"
     request_timeout: 10s
+    # Chat IDs webhook URLs may target. Empty = any chat; non-empty rejects
+    # requests naming other chats with 403 before anything is sent.
+    chat_allowlist: []
     rate_limit:
       per_chat_per_sec: 1
       global_per_sec: 30
@@ -255,6 +260,9 @@ config:
     # -- How long silence buttons stay active on an alert message (2h..48h).
     # After this window the sweeper removes the keyboard and late clicks are rejected.
     button_ttl: 8h
+    # -- Bound on the in-memory button/undo trackers (FIFO eviction of the
+    # oldest entry; an evicted button behaves like the restart case).
+    button_tracker_max: 10000
     # -- Which alert labels become silence matchers. Empty = ALL labels
     # (narrowest silence, only this exact alert instance). Listing labels,
     # e.g. [alertname, namespace], silences sibling alerts too — use with care.
