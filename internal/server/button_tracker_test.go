@@ -14,7 +14,7 @@ import (
 )
 
 func TestButtonTracker_RegisterValid(t *testing.T) {
-	tr := NewButtonTracker(time.Hour)
+	tr := NewButtonTracker(time.Hour, 0)
 	tr.Register(-100, 42, "fp")
 	if !tr.Valid(-100, 42) {
 		t.Error("expected valid")
@@ -28,7 +28,7 @@ func TestButtonTracker_RegisterValid(t *testing.T) {
 }
 
 func TestButtonTracker_RegisterZeroMessageIDIgnored(t *testing.T) {
-	tr := NewButtonTracker(time.Hour)
+	tr := NewButtonTracker(time.Hour, 0)
 	tr.Register(-100, 0, "fp")
 	if tr.Len() != 0 {
 		t.Error("message_id=0 must be ignored")
@@ -36,7 +36,7 @@ func TestButtonTracker_RegisterZeroMessageIDIgnored(t *testing.T) {
 }
 
 func TestButtonTracker_Expiry(t *testing.T) {
-	tr := NewButtonTracker(time.Hour)
+	tr := NewButtonTracker(time.Hour, 0)
 	now := time.Unix(0, 0)
 	tr.now = func() time.Time { return now }
 
@@ -51,7 +51,7 @@ func TestButtonTracker_Expiry(t *testing.T) {
 }
 
 func TestButtonTracker_Sweep(t *testing.T) {
-	tr := NewButtonTracker(time.Hour)
+	tr := NewButtonTracker(time.Hour, 0)
 	now := time.Unix(0, 0)
 	tr.now = func() time.Time { return now }
 
@@ -75,7 +75,7 @@ func TestButtonTracker_Sweep(t *testing.T) {
 }
 
 func TestButtonTracker_Consume(t *testing.T) {
-	tr := NewButtonTracker(time.Hour)
+	tr := NewButtonTracker(time.Hour, 0)
 	tr.Register(-100, 42, "fp")
 	tr.Consume(-100, 42)
 	if tr.Valid(-100, 42) {
@@ -132,7 +132,7 @@ func (f *sweepFakeTG) EditMessageReplyMarkup(_ context.Context, chatID, messageI
 }
 
 func TestButtonSweeper_EditsExpired(t *testing.T) {
-	tr := NewButtonTracker(time.Hour)
+	tr := NewButtonTracker(time.Hour, 0)
 	now := time.Unix(0, 0)
 	tr.now = func() time.Time { return now }
 	tr.Register(-100, 1, "fp1")
@@ -158,7 +158,7 @@ func TestButtonSweeper_EditsExpired(t *testing.T) {
 }
 
 func TestButtonSweeper_ContinuesOnEditError(t *testing.T) {
-	tr := NewButtonTracker(time.Hour)
+	tr := NewButtonTracker(time.Hour, 0)
 	now := time.Unix(0, 0)
 	tr.now = func() time.Time { return now }
 	tr.Register(-100, 1, "fp")
@@ -178,7 +178,7 @@ func TestButtonSweeper_ContinuesOnEditError(t *testing.T) {
 }
 
 func TestButtonSweeper_Run_StopsOnCtxCancel(t *testing.T) {
-	tr := NewButtonTracker(time.Hour)
+	tr := NewButtonTracker(time.Hour, 0)
 	tg := &sweepFakeTG{}
 	sw := &ButtonSweeper{
 		Tracker:  tr,
@@ -195,5 +195,69 @@ func TestButtonSweeper_Run_StopsOnCtxCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("sweeper did not stop within 1s of cancel")
+	}
+}
+
+func TestButtonTrackerEvictsOldestAtCap(t *testing.T) {
+	tr := NewButtonTracker(time.Hour, 3)
+	for i := int64(1); i <= 4; i++ {
+		tr.Register(-100, i, "fp")
+	}
+	if got := tr.Len(); got != 3 {
+		t.Fatalf("len = %d, want cap 3", got)
+	}
+	if tr.Valid(-100, 1) {
+		t.Fatal("oldest entry should have been evicted")
+	}
+	for i := int64(2); i <= 4; i++ {
+		if !tr.Valid(-100, i) {
+			t.Fatalf("entry %d should survive", i)
+		}
+	}
+}
+
+func TestButtonTrackerReRegisterRefreshesOrder(t *testing.T) {
+	tr := NewButtonTracker(time.Hour, 2)
+	tr.Register(-100, 1, "fp1")
+	tr.Register(-100, 2, "fp2")
+	// Re-register 1: it becomes the newest, so the next eviction takes 2.
+	tr.Register(-100, 1, "fp1")
+	tr.Register(-100, 3, "fp3")
+	if tr.Valid(-100, 2) {
+		t.Fatal("entry 2 should have been evicted")
+	}
+	if !tr.Valid(-100, 1) || !tr.Valid(-100, 3) {
+		t.Fatal("entries 1 and 3 should survive")
+	}
+}
+
+func TestButtonTrackerZeroCapUnbounded(t *testing.T) {
+	tr := NewButtonTracker(time.Hour, 0)
+	for i := int64(1); i <= 100; i++ {
+		tr.Register(-100, i, "fp")
+	}
+	if got := tr.Len(); got != 100 {
+		t.Fatalf("len = %d, want 100 (unbounded)", got)
+	}
+}
+
+func TestButtonTrackerSweepStopsAtFirstLive(t *testing.T) {
+	now := time.Now()
+	tr := NewButtonTracker(time.Hour, 0)
+	tr.now = func() time.Time { return now }
+	tr.Register(-100, 1, "old")
+	tr.Register(-100, 2, "old")
+	tr.now = func() time.Time { return now.Add(30 * time.Minute) }
+	tr.Register(-100, 3, "fresh")
+	// 70m: entries 1 and 2 (expire at 60m) are stale, entry 3 (expires at
+	// 90m) is still live.
+	tr.now = func() time.Time { return now.Add(70 * time.Minute) }
+
+	expired := tr.Sweep()
+	if len(expired) != 2 {
+		t.Fatalf("want 2 expired, got %d: %v", len(expired), expired)
+	}
+	if !tr.Valid(-100, 3) {
+		t.Fatal("fresh entry must survive the sweep")
 	}
 }

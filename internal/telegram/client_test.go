@@ -1,9 +1,11 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -229,5 +231,173 @@ func TestDryRunSkipsCall(t *testing.T) {
 	}
 	if called {
 		t.Error("DRY_RUN must not call Telegram")
+	}
+}
+
+func TestSendMessageErrorDoesNotLeakToken(t *testing.T) {
+	const token = "123456:AA-super-secret-token"
+	var logs bytes.Buffer
+	c := New(Config{
+		APIURL:         "http://127.0.0.1:1",
+		Token:          token,
+		RequestTimeout: 200 * time.Millisecond,
+		MaxAttempts:    2,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     2 * time.Millisecond,
+	}, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+
+	_, err := c.SendMessage(context.Background(), 1, nil, "hi", nil)
+	if err == nil {
+		t.Fatal("want error from unreachable API")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("bot token leaked into error: %v", err)
+	}
+	if !strings.Contains(err.Error(), redactedToken) {
+		t.Fatalf("want redaction marker in %q", err.Error())
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Fatalf("bot token leaked into logs: %s", logs.String())
+	}
+}
+
+func TestGetUpdatesErrorDoesNotLeakToken(t *testing.T) {
+	const token = "123456:AA-super-secret-token"
+	c := New(Config{
+		APIURL:         "http://127.0.0.1:1",
+		Token:          token,
+		RequestTimeout: 200 * time.Millisecond,
+		MaxAttempts:    1,
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := c.GetUpdates(ctx, 0, 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("want error from unreachable API")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("bot token leaked into error: %v", err)
+	}
+}
+
+func TestScrubTokenKeepsErrorsUnwrappable(t *testing.T) {
+	api := &APIError{StatusCode: 500, Body: "boom secret-token"}
+	wrapped := scrubToken(fmt.Errorf("http call: %w", api), "secret-token")
+	if strings.Contains(wrapped.Error(), "secret-token") {
+		t.Fatalf("token survived scrubbing: %v", wrapped)
+	}
+	var got *APIError
+	if !errors.As(wrapped, &got) || got.StatusCode != 500 {
+		t.Fatalf("errors.As lost the APIError: %v", wrapped)
+	}
+}
+
+func TestAPIErrorBodyIsScrubbed(t *testing.T) {
+	const token = "123456:AA-super-secret-token"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		// Telegram does not normally echo the token, but a proxy in front of it
+		// might: the error must stay safe to log either way.
+		_, _ = io.WriteString(w, `{"ok":false,"description":"Bad Request: bot`+token+` blocked"}`)
+	}))
+	defer srv.Close()
+
+	c := New(Config{APIURL: srv.URL, Token: token, RequestTimeout: time.Second, MaxAttempts: 1}, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	_, err := c.SendMessage(context.Background(), 1, nil, "hi", nil)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked: %v", err)
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest {
+		t.Fatalf("APIError not reachable through the scrubbed error: %v", err)
+	}
+}
+
+// newOKServer returns a Telegram stub that answers ok to everything and counts
+// calls per method suffix.
+func newOKServer(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+func TestEditMessageReplyMarkupGoesThroughLimiter(t *testing.T) {
+	srv, _ := newOKServer(t)
+	limiter := NewLimiter(100, 1) // 1 rps per chat, burst 1
+	c := New(Config{APIURL: srv.URL, Token: "tok", RequestTimeout: time.Second, MaxAttempts: 1},
+		limiter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if err := c.EditMessageReplyMarkup(context.Background(), 42, int64(i+1), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed < 1800*time.Millisecond {
+		t.Errorf("3 edits at 1 rps per chat should take ≥1.8s, got %v", elapsed)
+	}
+}
+
+func TestAnswerCallbackQueryConsumesGlobalQuota(t *testing.T) {
+	srv, _ := newOKServer(t)
+	limiter := NewLimiter(1, 1000) // 1 rps global
+	c := New(Config{APIURL: srv.URL, Token: "tok", RequestTimeout: time.Second, MaxAttempts: 1},
+		limiter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	start := time.Now()
+	for i := 0; i < 2; i++ {
+		if err := c.AnswerCallbackQuery(context.Background(), "cb", "ok", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed < 800*time.Millisecond {
+		t.Errorf("2 answers at 1 rps global should take ≥0.8s, got %v", elapsed)
+	}
+}
+
+func TestRetriesConsumeLimiterQuota(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"ok":false,"description":"boom"}`)
+	}))
+	defer srv.Close()
+
+	limiter := NewLimiter(1, 1000) // 1 rps global, burst 1
+	c := New(Config{
+		APIURL:         srv.URL,
+		Token:          "tok",
+		RequestTimeout: time.Second,
+		MaxAttempts:    3,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     2 * time.Millisecond,
+	}, limiter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	start := time.Now()
+	_, err := c.SendMessage(context.Background(), 1, nil, "hi", nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("want error after exhausted retries")
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("want 3 attempts, got %d", got)
+	}
+	// Attempt 1 spends the burst token; attempts 2 and 3 must each wait ~1s.
+	// Before the fix the limiter was consulted once per SendMessage, and the
+	// retries fired back-to-back.
+	if elapsed < 1800*time.Millisecond {
+		t.Errorf("retries bypassed the limiter: 3 attempts at 1 rps took %v", elapsed)
 	}
 }

@@ -1,8 +1,11 @@
 package source
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,5 +88,47 @@ func TestAlertmanagerInvalid(t *testing.T) {
 	}
 	if _, err := NewAlertmanager().Parse([]byte(`{"alerts":[]}`)); err == nil {
 		t.Error("expected error for empty alerts")
+	}
+}
+
+func TestParseRejectsTooManyAlerts(t *testing.T) {
+	alerts := make([]map[string]any, maxAlertsPerPayload+1)
+	for i := range alerts {
+		alerts[i] = map[string]any{
+			"status":      "firing",
+			"labels":      map[string]string{"alertname": fmt.Sprintf("A%d", i)},
+			"fingerprint": fmt.Sprintf("fp%d", i),
+		}
+	}
+	body, err := json.Marshal(map[string]any{"status": "firing", "alerts": alerts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewAlertmanager().Parse(body); err == nil {
+		t.Fatal("want error for oversized payload")
+	} else if !strings.Contains(err.Error(), "too many alerts") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseAcceptsMaxAlerts(t *testing.T) {
+	alerts := make([]map[string]any, maxAlertsPerPayload)
+	for i := range alerts {
+		alerts[i] = map[string]any{
+			"status":      "firing",
+			"labels":      map[string]string{"alertname": fmt.Sprintf("A%d", i)},
+			"fingerprint": fmt.Sprintf("fp%d", i),
+		}
+	}
+	body, err := json.Marshal(map[string]any{"status": "firing", "alerts": alerts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes, err := NewAlertmanager().Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != maxAlertsPerPayload {
+		t.Fatalf("want %d notifications, got %d", maxAlertsPerPayload, len(notes))
 	}
 }

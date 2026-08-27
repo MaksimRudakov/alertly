@@ -9,6 +9,13 @@ import (
 	"github.com/MaksimRudakov/alertly/internal/notification"
 )
 
+// maxAlertsPerPayload bounds one webhook request. MaxBodyBytes already caps
+// the payload size; this cap keeps a single request from fanning out into a
+// message flood (each alert becomes at least one Telegram send per target).
+// Alertmanager's webhook config has a matching `max_alerts` truncation knob —
+// set it at or below this value to avoid rejected deliveries.
+const maxAlertsPerPayload = 100
+
 type alertmanager struct{}
 
 func NewAlertmanager() Source { return alertmanager{} }
@@ -37,6 +44,9 @@ func (alertmanager) Parse(body []byte) ([]notification.Notification, error) {
 	}
 	if len(p.Alerts) == 0 {
 		return nil, fmt.Errorf("alertmanager: no alerts in payload")
+	}
+	if len(p.Alerts) > maxAlertsPerPayload {
+		return nil, fmt.Errorf("alertmanager: too many alerts in one request: %d > %d (set max_alerts in the Alertmanager webhook config)", len(p.Alerts), maxAlertsPerPayload)
 	}
 
 	out := make([]notification.Notification, 0, len(p.Alerts))

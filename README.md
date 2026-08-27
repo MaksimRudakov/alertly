@@ -17,9 +17,9 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
 - **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
 - **In-process deduplication** by `(fingerprint, chat, status)` with TTL — suppresses duplicate Telegram messages caused by Alertmanager re-sending a webhook it didn't get an ACK for.
-- Message splitting >4096 chars on rune boundaries, HTML-tag aware.
+- Message splitting >4096 UTF-16 units (Telegram's own unit — an emoji counts as two) on paragraph/line/word boundaries; HTML formatting survives the cut: tags open at the boundary are closed and reopened on the next part.
 - `text/template` rendering with helpers (`severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`).
-- Bearer-token webhook auth.
+- Bearer-token webhook auth; optional `telegram.chat_allowlist` restricting which chats webhook URLs may target.
 - Prometheus metrics, structured `slog` JSON logs, `/healthz` + `/readyz` (Telegram getMe + send-failure window).
 - Multi-arch image (amd64, arm64), distroless static, ~10 MB, runs as UID 65532.
 
@@ -370,10 +370,13 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `401 Unauthorized` on every webhook | wrong/missing `Authorization: Bearer` header | check `WEBHOOK_AUTH_TOKEN` matches client config |
+| `403 chat ... is not in telegram.chat_allowlist` | webhook URL targets a chat outside the allowlist | add the chat ID to `telegram.chat_allowlist`, or leave the list empty to allow any chat |
 | `/readyz` stuck on 503 with `telegram getMe failed` | bot token invalid or egress blocked | verify token via `getMe` manually; check NetworkPolicy / firewall to `api.telegram.org:443` |
 | Sends fail with `429 Too Many Requests` | upstream burst > rate limit | already retried with `Retry-After`; tune `telegram.rate_limit.global_per_sec` |
+| `400 too many alerts in one request` | Alertmanager group larger than 100 alerts | set `max_alerts` in the AM webhook config (≤100) or tighten grouping |
 | Template render error in logs | bad `text/template` syntax in config | validate locally; `default` template must always exist |
 | Long messages dropped silently | not split? always check `alertly_message_split_total` | verify `parse_mode` is `HTML` and template doesn't emit unbalanced tags |
+| `207 Multi-Status` with `request deadline reached` in logs | payload larger than what fits in `server.write_timeout` at the configured send rate | raise `server.write_timeout`, raise `telegram.rate_limit.per_chat_per_sec`, or split the payload upstream; the caller's retry is deduped |
 | Same alert delivered to Telegram twice | multiple alertly replicas without sticky routing | run `replicaCount: 1`, or hash the request path to a pod (see [Deduplication › Scaling](#scaling-considerations)) |
 | `alertly_telegram_retries_total{reason="deadline_skip"}` growing | server `WriteTimeout` shorter than worst-case retry budget | raise `server.write_timeout` or lower `telegram.retry.max_backoff`; check Telegram `Retry-After` headers in logs |
 | Silence buttons not shown on alerts | `updates.enabled: false`, chat not in `chat_allowlist`, or alert not `firing` | enable updates, add the chat ID to `updates.chat_allowlist`; buttons are only attached to firing Alertmanager alerts |
@@ -390,8 +393,8 @@ flowchart LR
   H2 --> P
   P --> N[Notification]
   N --> R[Renderer text/template]
-  R --> S[SplitMessage 4096]
-  S --> D{dedup.Reserve<br/>fp|chat|status}
+  R --> S[SplitMessage 4096 UTF-16]
+  S --> D{"dedup.Reserve<br/>fp|chat|status"}
   D -- already seen --> SKIP[skip + metric]
   D -- new --> RL[per-chat + global rate limit]
   RL --> T[Telegram Bot API]

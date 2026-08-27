@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `alertly` — Go HTTP service that ingests webhooks from Alertmanager and Kubewatch and forwards them to Telegram chats. Stdlib-first (`net/http` with `mux.Handle("POST /v1/...{chats}")`), no web framework.
 
 - Module: `github.com/MaksimRudakov/alertly`
-- Go: `1.25` (toolchain `go1.26.5`)
+- Go: `1.25` (toolchain `go1.26.6`)
 - Single binary entry: `cmd/alertly`
 
 Treat README + `examples/config.yaml` + `TODO.md` as the source of truth for current scope. Dedup, interactive silence buttons (Phase 2b), the generic source and the `/status` chat-ops command are shipped; `TODO.md` lists the remaining Phase 2/3 items (label routing, async queue, Markdown, `/alerts` command) that are intentionally deferred until a real signal demands them.
@@ -42,10 +42,10 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 
 `cmd/alertly/main.go` wires everything and starts `internal/server`. Per webhook:
 
-1. `recoverMiddleware` → `requestIDMiddleware` (sets `X-Request-Id`) → `loggingMiddleware` (slog logger attached to ctx).
-2. `authMiddleware` validates `Authorization: Bearer <WEBHOOK_AUTH_TOKEN>` with `subtle.ConstantTimeCompare`.
+1. `recoverMiddleware` → `requestIDMiddleware` (echoes a caller-supplied `X-Request-Id` only when it matches `[A-Za-z0-9._-]{1,64}`; anything else — control chars, spaces, non-ASCII — is replaced with a fresh UUID so callers cannot inject log noise through the echoed header) → `loggingMiddleware` (slog logger attached to ctx).
+2. `authMiddleware` validates `Authorization: Bearer <WEBHOOK_AUTH_TOKEN>` with `subtle.ConstantTimeCompare`, then `requestTimeoutMiddleware` puts an explicit deadline of `server.write_timeout - 1s` on the request context (webhook routes only). `http.Server.WriteTimeout` only arms a socket write deadline and never reaches `r.Context()`, so without this the deadline-aware retry below has nothing to check. When the budget runs out mid-payload the handler stops attempting further notifications, logs `request deadline reached`, and downgrades a would-be `200`/`204` to `207`.
 3. `webhookHandler` (handlers.go):
-   - parses `{chats}` path value via `parseChatTargets` — comma-separated `chat_id[:thread_id]` (e.g. `-1001234567890,-100456:42`).
+   - parses `{chats}` path value via `parseChatTargets` — comma-separated `chat_id[:thread_id]` (e.g. `-1001234567890,-100456:42`). When `telegram.chat_allowlist` is non-empty, any target outside it fails the whole request with `403` before anything is sent (also bounds per-chat metric cardinality and rate-limiter state, both keyed by caller-supplied chat IDs).
    - reads body through `http.MaxBytesReader(cfg.MaxBodyBytes)`.
    - calls `source.Parse(body)` → `[]notification.Notification`.
    - per notification: `renderer.Render(templateName, n)` → `telegram.SplitMessage(text, TelegramTextLimit=4096)` → `tg.SendMessage` per `(target, part)`.
@@ -55,7 +55,7 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 
 `Source` is `Name() + Parse([]byte) → []notification.Notification`. Implementations register themselves in `cmd/alertly/main.go` into a `map[string]Source`; the route `POST /v1/{name}/{chats}` is generated from that map. Adding a new source = new file in `internal/source` + entry in the map. The `templateName` passed to the handler equals the source name (with fallback to `default` inside the renderer).
 
-`alertmanager`: standard webhook payload; severity from `labels.severity` (default `info`); title prefers `annotations.summary`, body prefers `annotations.description`; emits a Runbook link from `annotations.runbook_url` when present (Prometheus `generatorURL` is intentionally ignored — internal Prometheus links are rarely reachable from Telegram and add noise).
+`alertmanager`: standard webhook payload (max 100 alerts per request, mirroring the generic source cap — point AM's webhook `max_alerts` at or below it); severity from `labels.severity` (default `info`); title prefers `annotations.summary`, body prefers `annotations.description`; emits a Runbook link from `annotations.runbook_url` when present (Prometheus `generatorURL` is intentionally ignored — internal Prometheus links are rarely reachable from Telegram and add noise).
 
 `kubewatch`: tries new (`eventmeta`) format then legacy flat; severity becomes `warning` for `Type=Warning` or `Reason=Failed`; fingerprint is sha256-16 of `kind|namespace|name|reason|type|message` — the message is included deliberately so dedup only absorbs identical redeliveries, not distinct events on the same object.
 
@@ -65,11 +65,11 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 
 `internal/notification.Notification` is the canonical struct — sources produce it, templates consume it. Templates are `text/template` (NOT `html/template`; HTML escaping is the caller's responsibility via `escape_html`). Parse mode is `HTML` (default; Markdown is Phase 2). Helpers: `severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`. A template named after the source is preferred; fallback is `default` (which is required to exist — config loader injects one if missing).
 
-Splitter (`telegram/splitter.go`) cuts on rune boundaries at `\n\n`, `\n`, then space, then hard cut, and `avoidTagSplit` rewinds before any unclosed `<` to keep HTML tags intact. Increments `alertly_message_split_total` when split occurs.
+Splitter (`telegram/splitter.go`) measures length in **UTF-16 code units** (what Telegram counts: an astral-plane rune such as an emoji costs 2) and cuts at `\n\n`, `\n`, then space, then hard cut. `avoidTagSplit` rewinds before any unclosed `<` so a cut never lands inside a tag, and `scanTags`/`openingTags`/`closingTags` keep formatting balanced across parts: tags still open at a cut are closed at the end of the part and reopened verbatim (attributes included) at the start of the next, so Telegram never rejects a part with «Unclosed start tag». Surrogate pairs are never split. Increments `alertly_message_split_total` when split occurs.
 
 `telegram.client` does retry with exponential backoff (`MaxAttempts`, `InitialBackoff`, `MaxBackoff`). `IsRetryable`: `429` and `5xx` are retryable; `4xx` is not; non-API errors (network) retryable. On `429`, honors `parameters.retry_after` from body or `Retry-After` header (capped to `MaxBackoff`). Rate limiter (`golang.org/x/time/rate`) enforces global + per-chat caps; `Wait` blocks before each send.
 
-Retry is **deadline-aware**: before sleeping for the next backoff, the client checks `ctx.Deadline()` (driven by the server `WriteTimeout`). If `remaining < wait + 500ms`, retry is aborted and the current error is returned immediately, with `alertly_telegram_retries_total{reason="deadline_skip"}` incremented. Rationale: avoid the failure mode where alertly sleeps past the server `WriteTimeout`, ultimately delivers the message to Telegram on a later attempt, but the caller (Alertmanager) has already given up and will retry — producing a duplicate.
+Retry is **deadline-aware**: before sleeping for the next backoff, the client checks `ctx.Deadline()` (set by `requestTimeoutMiddleware` from the server `WriteTimeout`). If `remaining < wait + 500ms`, retry is aborted and the current error is returned immediately, with `alertly_telegram_retries_total{reason="deadline_skip"}` incremented. Rationale: avoid the failure mode where alertly sleeps past the server `WriteTimeout`, ultimately delivers the message to Telegram on a later attempt, but the caller (Alertmanager) has already given up and will retry — producing a duplicate.
 
 ### Dedup (`internal/dedup`)
 
@@ -79,9 +79,9 @@ In-process TTL cache keyed by `fingerprint|chat_id|thread_id|status`. `Reserve(k
 
 Off by default; enabled via `updates.enabled` + `alertmanager.url`. Moving parts (all wired in `setupUpdates` in `main.go`):
 - `server.AlertmanagerKeyboard` (keyboard.go) attaches a `🔇 Silence <dur>` row to firing alertmanager notifications in allowlisted chats; buttons whose `callback_data` would exceed Telegram's 64-byte limit are skipped (a keyboard with no valid buttons is dropped).
-- `server.UpdatesPoller` (updates.go) long-polls `getUpdates` (`allowed_updates=["callback_query"]`, plus `"message"` when `updates.commands.enabled`) through a dedicated keep-alive HTTP client; each callback/message is handled synchronously under a 15s `HandleTimeout` so a stuck AM/Telegram call cannot stall the loop. Offset is in-memory → delivery is at-least-once.
+- `server.UpdatesPoller` (updates.go) long-polls `getUpdates` (`allowed_updates=["callback_query"]`, plus `"message"` when `updates.commands.enabled`) through a dedicated keep-alive HTTP client; each callback/message is handled synchronously via `dispatch` — a 15s `HandleTimeout` so a stuck AM/Telegram call cannot stall the loop, plus a panic guard (the poller runs outside the HTTP stack, so `recoverMiddleware` does not cover it; a panicking handler is logged with its stack and the loop continues). Offset is in-memory → delivery is at-least-once.
 - `server.CallbackHandler` (callback.go) validates chat/user allowlists and the `ButtonTracker` window, resolves labels (AM API → `alertmanager.LabelCache` fallback, hit/miss metered), creates the silence. Matcher scope comes from `updates.silence_matchers` (empty = all labels; zero matchers after filtering → refuse). After success the keyboard is replaced with an `↩️ Undo` button (action `u`, silence ID in the second callback field) tracked by a separate `UndoTracker` with TTL `updates.undo_window` (0 disables); pressing it calls `DeleteSilence`. `answer()` runs on a context detached from the handle budget so the user always gets feedback.
-- `server.ButtonTracker` + sweeper (button_tracker.go): in-memory TTL registry of messages with live buttons; restart invalidates old buttons (strict policy).
+- `server.ButtonTracker` + sweeper (button_tracker.go): in-memory TTL registry of messages with live buttons, bounded by `updates.button_tracker_max` (FIFO eviction — one shared TTL means insertion order is expiry order; both the silence and undo trackers share the knob); restart or eviction invalidates old buttons (strict policy).
 - `server.MessageHandler` (message.go) + `server.StatusReporter` (status.go): read-only chat-ops, gated by `updates.commands.enabled` (requires `updates.enabled`). Only `/status` (version, uptime, readiness, cache sizes via `SizeStat` closures wired in `main.go`); same chat/user allowlists as callbacks; unknown commands and non-allowlisted chats are ignored silently. Metric `alertly_commands_received_total{command,status}` (unknown commands → `command="unknown"`). With `commands.status.pipeline` (default on) the reply adds AM `GET /api/v2/status`, firing/silenced counts, a Watchdog deadman check (`watchdog_alert`, stale >15m ⇒ Prometheus suspected) and `server.ActivityTracker` timestamps (last parsed webhook / last successful send, recorded in handlers.go); each AM call is bounded by `pipeline_timeout` (default 4s) so a dead AM can't eat the callback handle budget. `ReadinessTracker.Touch()` is called by the health loop on every probe so "Last Telegram check" tracks probing, not the last readiness transition.
 - `internal/alertmanager.client` retries network errors, 429 and 5xx up to 3 attempts with linear backoff (300ms step); 4xx is terminal. A duplicate silence from a retried POST is harmless (identical matchers).
 - `alertmanager.LabelCache` is a TTL+FIFO map with O(1) eviction (`container/list`).
@@ -101,7 +101,7 @@ Off by default; enabled via `updates.enabled` + `alertmanager.url`. Moving parts
 
 ### Configuration
 
-`config.Load(path)` starts from `config.Default()` and overlays YAML. Defaults are intentionally production-sane; `examples/config.yaml` is what `make run` uses. `LOG_LEVEL` env overrides `logging.level` post-parse. `Validate()` enforces non-zero timeouts/limits and valid log level/format. Hot-reload is **not** supported — restart the process.
+`config.Load(path)` starts from `config.Default()` and overlays YAML. The HTTP server sets explicit `idle_timeout` (120s — above `read_timeout`, which is net/http's fallback, so Alertmanager keep-alives stay warm) and `read_header_timeout` (5s), plus a 64 KiB `MaxHeaderBytes` constant. Defaults are intentionally production-sane; `examples/config.yaml` is what `make run` uses. `LOG_LEVEL` env overrides `logging.level` post-parse. `Validate()` enforces non-zero timeouts/limits and valid log level/format. Hot-reload is **not** supported — restart the process.
 
 Required env: `TELEGRAM_BOT_TOKEN`, `WEBHOOK_AUTH_TOKEN`. Optional: `ALERTLY_CONFIG` (default `/etc/alertly/config.yaml`), `LOG_LEVEL`, `DRY_RUN`.
 
@@ -113,6 +113,6 @@ All in `internal/metrics`. Custom registry (no default Go process collectors exc
 
 - `internal/` for everything; `pkg/` exists but is empty — keep it that way unless something needs to be importable by external modules.
 - Sources/templates/sinks are wired in `cmd/alertly/main.go` — the rest of the code is plain interfaces. When adding a webhook source, also add a same-named template entry in `examples/config.yaml`.
-- Errors: wrap with `fmt.Errorf("%w", err)`; `telegram.APIError` carries `StatusCode` + optional `RetryAfter` and is the typed error the handler/readiness logic introspects.
+- Errors: wrap with `fmt.Errorf("%w", err)`; `telegram.APIError` carries `StatusCode` + optional `RetryAfter` and is the typed error the handler/readiness logic introspects. Telegram network errors are passed through `client.scrub` first — the bot token lives in the request path and `*url.Error` prints the full URL, so an unscrubbed error writes the credentials into the logs. Any new call path that surfaces a raw transport error must scrub it too.
 - Logging: `slog` with JSON handler by default; per-request logger attached to `ctx` via `loggerFrom(ctx)` — handlers should use it, not `slog.Default()`.
 - Build metadata is injected via ldflags into `internal/version` (`Version`, `Commit`, `Date`) — both Makefile and Dockerfile pass these.
