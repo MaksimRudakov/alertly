@@ -43,7 +43,7 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 `cmd/alertly/main.go` wires everything and starts `internal/server`. Per webhook:
 
 1. `recoverMiddleware` → `requestIDMiddleware` (sets `X-Request-Id`) → `loggingMiddleware` (slog logger attached to ctx).
-2. `authMiddleware` validates `Authorization: Bearer <WEBHOOK_AUTH_TOKEN>` with `subtle.ConstantTimeCompare`.
+2. `authMiddleware` validates `Authorization: Bearer <WEBHOOK_AUTH_TOKEN>` with `subtle.ConstantTimeCompare`, then `requestTimeoutMiddleware` puts an explicit deadline of `server.write_timeout - 1s` on the request context (webhook routes only). `http.Server.WriteTimeout` only arms a socket write deadline and never reaches `r.Context()`, so without this the deadline-aware retry below has nothing to check. When the budget runs out mid-payload the handler stops attempting further notifications, logs `request deadline reached`, and downgrades a would-be `200`/`204` to `207`.
 3. `webhookHandler` (handlers.go):
    - parses `{chats}` path value via `parseChatTargets` — comma-separated `chat_id[:thread_id]` (e.g. `-1001234567890,-100456:42`).
    - reads body through `http.MaxBytesReader(cfg.MaxBodyBytes)`.
@@ -65,11 +65,11 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 
 `internal/notification.Notification` is the canonical struct — sources produce it, templates consume it. Templates are `text/template` (NOT `html/template`; HTML escaping is the caller's responsibility via `escape_html`). Parse mode is `HTML` (default; Markdown is Phase 2). Helpers: `severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`. A template named after the source is preferred; fallback is `default` (which is required to exist — config loader injects one if missing).
 
-Splitter (`telegram/splitter.go`) cuts on rune boundaries at `\n\n`, `\n`, then space, then hard cut, and `avoidTagSplit` rewinds before any unclosed `<` to keep HTML tags intact. Increments `alertly_message_split_total` when split occurs.
+Splitter (`telegram/splitter.go`) measures length in **UTF-16 code units** (what Telegram counts: an astral-plane rune such as an emoji costs 2) and cuts at `\n\n`, `\n`, then space, then hard cut. `avoidTagSplit` rewinds before any unclosed `<` so a cut never lands inside a tag, and `scanTags`/`openingTags`/`closingTags` keep formatting balanced across parts: tags still open at a cut are closed at the end of the part and reopened verbatim (attributes included) at the start of the next, so Telegram never rejects a part with «Unclosed start tag». Surrogate pairs are never split. Increments `alertly_message_split_total` when split occurs.
 
 `telegram.client` does retry with exponential backoff (`MaxAttempts`, `InitialBackoff`, `MaxBackoff`). `IsRetryable`: `429` and `5xx` are retryable; `4xx` is not; non-API errors (network) retryable. On `429`, honors `parameters.retry_after` from body or `Retry-After` header (capped to `MaxBackoff`). Rate limiter (`golang.org/x/time/rate`) enforces global + per-chat caps; `Wait` blocks before each send.
 
-Retry is **deadline-aware**: before sleeping for the next backoff, the client checks `ctx.Deadline()` (driven by the server `WriteTimeout`). If `remaining < wait + 500ms`, retry is aborted and the current error is returned immediately, with `alertly_telegram_retries_total{reason="deadline_skip"}` incremented. Rationale: avoid the failure mode where alertly sleeps past the server `WriteTimeout`, ultimately delivers the message to Telegram on a later attempt, but the caller (Alertmanager) has already given up and will retry — producing a duplicate.
+Retry is **deadline-aware**: before sleeping for the next backoff, the client checks `ctx.Deadline()` (set by `requestTimeoutMiddleware` from the server `WriteTimeout`). If `remaining < wait + 500ms`, retry is aborted and the current error is returned immediately, with `alertly_telegram_retries_total{reason="deadline_skip"}` incremented. Rationale: avoid the failure mode where alertly sleeps past the server `WriteTimeout`, ultimately delivers the message to Telegram on a later attempt, but the caller (Alertmanager) has already given up and will retry — producing a duplicate.
 
 ### Dedup (`internal/dedup`)
 
@@ -113,6 +113,6 @@ All in `internal/metrics`. Custom registry (no default Go process collectors exc
 
 - `internal/` for everything; `pkg/` exists but is empty — keep it that way unless something needs to be importable by external modules.
 - Sources/templates/sinks are wired in `cmd/alertly/main.go` — the rest of the code is plain interfaces. When adding a webhook source, also add a same-named template entry in `examples/config.yaml`.
-- Errors: wrap with `fmt.Errorf("%w", err)`; `telegram.APIError` carries `StatusCode` + optional `RetryAfter` and is the typed error the handler/readiness logic introspects.
+- Errors: wrap with `fmt.Errorf("%w", err)`; `telegram.APIError` carries `StatusCode` + optional `RetryAfter` and is the typed error the handler/readiness logic introspects. Telegram network errors are passed through `client.scrub` first — the bot token lives in the request path and `*url.Error` prints the full URL, so an unscrubbed error writes the credentials into the logs. Any new call path that surfaces a raw transport error must scrub it too.
 - Logging: `slog` with JSON handler by default; per-request logger attached to `ctx` via `loggerFrom(ctx)` — handlers should use it, not `slog.Default()`.
 - Build metadata is injected via ldflags into `internal/version` (`Version`, `Commit`, `Date`) — both Makefile and Dockerfile pass these.

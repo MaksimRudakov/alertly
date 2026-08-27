@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Security
+- **Bot token no longer reaches the logs.** Telegram authenticates by carrying the token in the request path, and `net/http` puts the full URL into `*url.Error` — so every network-level failure (`http call: Post "https://api.telegram.org/bot<token>/sendMessage": dial tcp …`) printed the bot credentials into the `telegram retry` and `send failed` log lines. Transport errors from the Telegram client and the updates poller are now scrubbed (`<redacted>`) before they are logged or returned, while `errors.Is`/`errors.As` still reach the original error.
+
+### Fixed
+- **Deadline-aware retry actually has a deadline now.** `http.Server.WriteTimeout` only arms a socket write deadline; it never reaches `r.Context()`, so `ctx.Deadline()` in the Telegram client always reported «no deadline» in production and the retry abort (and its `alertly_telegram_retries_total{reason="deadline_skip"}` counter) could never fire. Webhook routes now carry an explicit request budget of `server.write_timeout - 1s`. When that budget runs out mid-payload the handler stops attempting further notifications, logs `request deadline reached`, and answers `207` instead of `200`/`204` so the caller retries what was not attempted (dedup keeps the retry from duplicating what already landed).
+- **Split messages keep their HTML formatting.** A message longer than the limit was cut without regard for open tags, so a part could end inside `<b>…` and Telegram rejected it with `can't parse entities: Unclosed start tag`. Tags open at a cut are now closed at the end of the part and reopened verbatim (attributes included) at the start of the next one.
+- **Message length is measured in UTF-16 code units**, the unit Telegram itself counts, instead of runes. A message of 4096 emoji is 8192 units and was previously sent unsplit, drawing `message is too long`. Surrogate pairs are never cut in half.
+
 ## [0.6.0] - 2026-07-30
 
 `/status` grows delivery-pipeline diagnostics: one command now answers «the alert chat went quiet — is Alertmanager down, is Prometheus down, or is it genuinely quiet?».
