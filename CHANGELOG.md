@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-28
+
+Hardening release: the Telegram delivery path loses three long-standing bugs (token in logs, a retry-deadline mechanism that never fired, message splitting Telegram could reject), every in-memory registry and API call gains a bound, and webhooks get an optional chat allowlist. Backward compatible: every new knob defaults to previous behaviour except the 100-alert payload cap (mirrors the generic source) and tightened HTTP header/timeout defaults.
+
 ### Added
 - **`updates.button_tracker_max`** (default 10000) bounds the in-memory silence/undo button trackers with FIFO eviction — previously they grew without limit for the full `button_ttl` (8h default) under a steady stream of firing alerts. An evicted button behaves exactly like the restart case: it stays on screen, a click is rejected and the keyboard stripped.
 - **`server.idle_timeout`** (120s) and **`server.read_header_timeout`** (5s): explicit HTTP server timeouts. Previously both fell back to `read_timeout` (10s), which silently churned Alertmanager's keep-alive connections every 10s of quiet; request headers are now also capped at 64 KiB (down from net/http's 1 MB default).
@@ -23,6 +27,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - **The rate limiter now covers every chat-addressed API call and every retry attempt.** `editMessageText`/`editMessageReplyMarkup` (keyboard strips, sweeper passes) and `answerCallbackQuery` went straight to the API — one sweep over a pile of expired buttons was an unthrottled burst; and retries inside a single send bypassed the quota taken once up front. The limiter wait now happens per attempt inside the retry loop; edits consume global + per-chat quota, callback answers global only. `getMe` (health probe) and `getUpdates` (long poll) stay unlimited.
 - **A caller-supplied `X-Request-Id` is validated** (`[A-Za-z0-9._-]`, max 64 chars) before being echoed into logs and the response header; anything else is replaced with a generated UUID, so a client cannot inject structured-log noise or terminal escapes through the header.
 - **A panic in a callback/command handler no longer kills the process.** The updates poller runs outside the HTTP stack, so `recoverMiddleware` never covered it; a panicking handler is now logged with its stack and the poll loop continues.
+
+### Changed
+- Dependencies: `prometheus/client_golang` 1.23.2 → 1.24.1; GitHub Actions bumped across workflows (checkout v7, setup-go v7, trivy-action 0.36, codeql-action 4.37.8, cosign-installer v4, buildx/login-action refreshes); `distroless/static-debian12` base digest refreshed.
+- CI runs once per push: the `push` trigger for feature branches is gone (`pull_request` covers every push to an open PR), halving CI time per push. Superseded pushes to the same PR cancel the older run.
 
 ## [0.6.0] - 2026-07-30
 
@@ -152,7 +160,10 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/MaksimRudakov/alertly/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/MaksimRudakov/alertly/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/MaksimRudakov/alertly/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/MaksimRudakov/alertly/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/MaksimRudakov/alertly/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/MaksimRudakov/alertly/compare/v0.1.0...v0.2.0
