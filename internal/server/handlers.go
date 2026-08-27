@@ -86,8 +86,16 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 		var (
 			totalAttempts int
 			totalErrors   int
+			// deadlineHit marks that the request budget ran out before every
+			// notification was attempted, so the outcome is reported as partial
+			// even when nothing that was attempted failed.
+			deadlineHit bool
 		)
 		for _, n := range notes {
+			if ctx.Err() != nil {
+				deadlineHit = true
+				break
+			}
 			rendered, err := d.renderer.Render(d.templateName, n)
 			if err != nil {
 				logger.Error("render failed", "fingerprint", n.Fingerprint, "err", err)
@@ -103,6 +111,10 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			}
 
 			for _, target := range targets {
+				if ctx.Err() != nil {
+					deadlineHit = true
+					break
+				}
 				dedupKey := dedup.Key(n.Fingerprint, target.ChatID, target.ThreadID, n.Status)
 				if d.dedup.Reserve(dedupKey) {
 					metrics.DedupSkipped.WithLabelValues(d.source.Name(),
@@ -154,6 +166,17 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 					d.dedup.Forget(dedupKey)
 				}
 			}
+			if deadlineHit {
+				break
+			}
+		}
+
+		if deadlineHit {
+			logger.Warn("request deadline reached; remaining notifications not attempted",
+				"attempts", totalAttempts,
+				"errors", totalErrors,
+				"notifications", len(notes),
+			)
 		}
 
 		var status int
@@ -166,6 +189,15 @@ func webhookHandler(d webhookDeps) http.HandlerFunc {
 			status = http.StatusMultiStatus
 		default:
 			status = http.StatusInternalServerError
+		}
+		if deadlineHit {
+			// Part of the payload was never attempted: never answer 200/204,
+			// so the caller knows to retry (dedup keeps the retry from
+			// duplicating whatever already landed).
+			switch status {
+			case http.StatusOK, http.StatusNoContent:
+				status = http.StatusMultiStatus
+			}
 		}
 
 		metrics.NotificationsReceived.WithLabelValues(d.source.Name(), strconv.Itoa(status)).Inc()

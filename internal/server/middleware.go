@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
@@ -74,6 +75,34 @@ func recoverMiddleware(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// handlerWriteMargin is held back from the write timeout so the handler still
+// has time to write its response after the last Telegram call returns.
+const handlerWriteMargin = time.Second
+
+// requestTimeoutMiddleware puts an explicit deadline on the request context.
+// http.Server.WriteTimeout only arms a socket write deadline — it never reaches
+// r.Context() — so without this the Telegram client sees a deadline-less
+// context and its deadline-aware retry can never fire: alertly would keep
+// retrying past the point where the caller (Alertmanager) gave up, deliver the
+// message anyway, and get a duplicate from the caller's own retry.
+func requestTimeoutMiddleware(writeTimeout time.Duration) func(http.Handler) http.Handler {
+	if writeTimeout <= 0 {
+		// Write timeout disabled: nothing to derive a request budget from.
+		return func(next http.Handler) http.Handler { return next }
+	}
+	timeout := writeTimeout - handlerWriteMargin
+	if timeout <= 0 {
+		timeout = writeTimeout / 2
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			defer cancel()
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
 func authMiddleware(token string) func(http.Handler) http.Handler {

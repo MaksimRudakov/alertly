@@ -53,6 +53,7 @@ func New(cfg config.Server, deps Deps) *Server {
 	mux.Handle("GET /metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{Registry: deps.Registry}))
 
 	auth := authMiddleware(deps.AuthToken)
+	withDeadline := requestTimeoutMiddleware(cfg.WriteTimeout)
 
 	for name, src := range deps.Sources {
 		h := webhookHandler(webhookDeps{
@@ -67,7 +68,7 @@ func New(cfg config.Server, deps Deps) *Server {
 			dedup:        deps.Dedup,
 			activity:     deps.Activity,
 		})
-		mux.Handle(fmt.Sprintf("POST /v1/%s/{chats}", name), auth(h))
+		mux.Handle(fmt.Sprintf("POST /v1/%s/{chats}", name), auth(withDeadline(h)))
 	}
 
 	root := chain(mux,
