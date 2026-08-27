@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+- **`telegram.chat_allowlist`** — optional list of chat IDs webhook URLs may target. Empty (default) keeps the current any-chat behaviour; non-empty rejects requests naming other chats with `403` before anything is sent. Since per-chat metric labels and rate-limiter state are keyed by whatever chat IDs callers put in the URL, the allowlist also bounds both.
+- **Alertmanager payloads are capped at 100 alerts per request** (mirroring the generic source's existing cap): a larger group is rejected with `400` instead of fanning out into a message flood. Point Alertmanager's webhook `max_alerts` at or below the cap.
+
 ### Security
 - **Bot token no longer reaches the logs.** Telegram authenticates by carrying the token in the request path, and `net/http` puts the full URL into `*url.Error` — so every network-level failure (`http call: Post "https://api.telegram.org/bot<token>/sendMessage": dial tcp …`) printed the bot credentials into the `telegram retry` and `send failed` log lines. Transport errors from the Telegram client and the updates poller are now scrubbed (`<redacted>`) before they are logged or returned, while `errors.Is`/`errors.As` still reach the original error.
 
@@ -13,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - **Deadline-aware retry actually has a deadline now.** `http.Server.WriteTimeout` only arms a socket write deadline; it never reaches `r.Context()`, so `ctx.Deadline()` in the Telegram client always reported «no deadline» in production and the retry abort (and its `alertly_telegram_retries_total{reason="deadline_skip"}` counter) could never fire. Webhook routes now carry an explicit request budget of `server.write_timeout - 1s`. When that budget runs out mid-payload the handler stops attempting further notifications, logs `request deadline reached`, and answers `207` instead of `200`/`204` so the caller retries what was not attempted (dedup keeps the retry from duplicating what already landed).
 - **Split messages keep their HTML formatting.** A message longer than the limit was cut without regard for open tags, so a part could end inside `<b>…` and Telegram rejected it with `can't parse entities: Unclosed start tag`. Tags open at a cut are now closed at the end of the part and reopened verbatim (attributes included) at the start of the next one.
 - **Message length is measured in UTF-16 code units**, the unit Telegram itself counts, instead of runes. A message of 4096 emoji is 8192 units and was previously sent unsplit, drawing `message is too long`. Surrogate pairs are never cut in half.
+- **The rate limiter now covers every chat-addressed API call and every retry attempt.** `editMessageText`/`editMessageReplyMarkup` (keyboard strips, sweeper passes) and `answerCallbackQuery` went straight to the API — one sweep over a pile of expired buttons was an unthrottled burst; and retries inside a single send bypassed the quota taken once up front. The limiter wait now happens per attempt inside the retry loop; edits consume global + per-chat quota, callback answers global only. `getMe` (health probe) and `getUpdates` (long poll) stay unlimited.
+- **A panic in a callback/command handler no longer kills the process.** The updates poller runs outside the HTTP stack, so `recoverMiddleware` never covered it; a panicking handler is now logged with its stack and the poll loop continues.
 
 ## [0.6.0] - 2026-07-30
 
