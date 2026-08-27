@@ -113,16 +113,6 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 		return 0, nil
 	}
 
-	if c.limiter != nil {
-		waited, err := c.limiter.Wait(ctx, chatID)
-		if err != nil {
-			return 0, fmt.Errorf("rate limiter wait: %w", err)
-		}
-		if waited > 50*time.Millisecond {
-			metrics.TelegramRateLimited.WithLabelValues(metrics.ChatLabel(chatID)).Inc()
-		}
-	}
-
 	payload := sendMessagePayload{
 		ChatID:                chatID,
 		Text:                  text,
@@ -140,7 +130,7 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 		return 0, fmt.Errorf("marshal sendMessage payload: %w", err)
 	}
 
-	okBody, err := c.callWithRetry(ctx, endpoint, body)
+	okBody, err := c.callWithRetry(ctx, endpoint, body, c.chatWait(chatID))
 	if err != nil {
 		return 0, err
 	}
@@ -149,8 +139,44 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 
 func (c *client) GetMe(ctx context.Context) error {
 	endpoint := c.endpoint("getMe")
-	_, err := c.callWithRetry(ctx, endpoint, nil)
+	// Health probe: deliberately not rate limited so a busy send queue cannot
+	// delay readiness detection.
+	_, err := c.callWithRetry(ctx, endpoint, nil, nil)
 	return err
+}
+
+// chatWait returns a per-attempt limiter wait for calls addressed to a chat:
+// global + per-chat quota, metered when the wait was long enough to matter.
+// Waiting inside the retry loop (not once before it) keeps retries from
+// bypassing the quota — five backoff attempts are five API calls.
+func (c *client) chatWait(chatID int64) func(context.Context) error {
+	if c.limiter == nil {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		waited, err := c.limiter.Wait(ctx, chatID)
+		if err != nil {
+			return fmt.Errorf("rate limiter wait: %w", err)
+		}
+		if waited > 50*time.Millisecond {
+			metrics.TelegramRateLimited.WithLabelValues(metrics.ChatLabel(chatID)).Inc()
+		}
+		return nil
+	}
+}
+
+// globalWait returns a per-attempt limiter wait consuming only the global
+// quota, for calls without a chat (answerCallbackQuery).
+func (c *client) globalWait() func(context.Context) error {
+	if c.limiter == nil {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		if err := c.limiter.WaitGlobal(ctx); err != nil {
+			return fmt.Errorf("rate limiter wait: %w", err)
+		}
+		return nil
+	}
 }
 
 func parseMessageID(body []byte) int64 {
@@ -180,9 +206,14 @@ func (c *client) endpoint(method string) string {
 // caller to retry — and the message to be sent twice.
 const retrySafetyMargin = 500 * time.Millisecond
 
-func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+func (c *client) callWithRetry(ctx context.Context, endpoint string, body []byte, wait func(context.Context) error) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < c.cfg.MaxAttempts; attempt++ {
+		if wait != nil {
+			if err := wait(ctx); err != nil {
+				return nil, err
+			}
+		}
 		okBody, err := c.callOnce(ctx, endpoint, body)
 		if err == nil {
 			return okBody, nil

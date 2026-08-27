@@ -318,3 +318,86 @@ func TestAPIErrorBodyIsScrubbed(t *testing.T) {
 		t.Fatalf("APIError not reachable through the scrubbed error: %v", err)
 	}
 }
+
+// newOKServer returns a Telegram stub that answers ok to everything and counts
+// calls per method suffix.
+func newOKServer(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+func TestEditMessageReplyMarkupGoesThroughLimiter(t *testing.T) {
+	srv, _ := newOKServer(t)
+	limiter := NewLimiter(100, 1) // 1 rps per chat, burst 1
+	c := New(Config{APIURL: srv.URL, Token: "tok", RequestTimeout: time.Second, MaxAttempts: 1},
+		limiter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if err := c.EditMessageReplyMarkup(context.Background(), 42, int64(i+1), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed < 1800*time.Millisecond {
+		t.Errorf("3 edits at 1 rps per chat should take ≥1.8s, got %v", elapsed)
+	}
+}
+
+func TestAnswerCallbackQueryConsumesGlobalQuota(t *testing.T) {
+	srv, _ := newOKServer(t)
+	limiter := NewLimiter(1, 1000) // 1 rps global
+	c := New(Config{APIURL: srv.URL, Token: "tok", RequestTimeout: time.Second, MaxAttempts: 1},
+		limiter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	start := time.Now()
+	for i := 0; i < 2; i++ {
+		if err := c.AnswerCallbackQuery(context.Background(), "cb", "ok", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed < 800*time.Millisecond {
+		t.Errorf("2 answers at 1 rps global should take ≥0.8s, got %v", elapsed)
+	}
+}
+
+func TestRetriesConsumeLimiterQuota(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"ok":false,"description":"boom"}`)
+	}))
+	defer srv.Close()
+
+	limiter := NewLimiter(1, 1000) // 1 rps global, burst 1
+	c := New(Config{
+		APIURL:         srv.URL,
+		Token:          "tok",
+		RequestTimeout: time.Second,
+		MaxAttempts:    3,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     2 * time.Millisecond,
+	}, limiter, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	start := time.Now()
+	_, err := c.SendMessage(context.Background(), 1, nil, "hi", nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("want error after exhausted retries")
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("want 3 attempts, got %d", got)
+	}
+	// Attempt 1 spends the burst token; attempts 2 and 3 must each wait ~1s.
+	// Before the fix the limiter was consulted once per SendMessage, and the
+	// retries fired back-to-back.
+	if elapsed < 1800*time.Millisecond {
+		t.Errorf("retries bypassed the limiter: 3 attempts at 1 rps took %v", elapsed)
+	}
+}

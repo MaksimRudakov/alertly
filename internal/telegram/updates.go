@@ -159,7 +159,7 @@ func (c *client) AnswerCallbackQuery(ctx context.Context, callbackID, text strin
 	if err != nil {
 		return fmt.Errorf("marshal answerCallbackQuery: %w", err)
 	}
-	_, err = c.callWithRetry(ctx, c.endpoint("answerCallbackQuery"), body)
+	_, err = c.callWithRetry(ctx, c.endpoint("answerCallbackQuery"), body, c.globalWait())
 	return err
 }
 
@@ -180,7 +180,7 @@ func (c *client) EditMessageText(ctx context.Context, chatID int64, messageID in
 	if err != nil {
 		return fmt.Errorf("marshal editMessageText: %w", err)
 	}
-	_, err = c.callWithRetry(ctx, c.endpoint("editMessageText"), body)
+	_, err = c.callWithRetry(ctx, c.endpoint("editMessageText"), body, c.chatWait(chatID))
 	return err
 }
 
@@ -198,6 +198,6 @@ func (c *client) EditMessageReplyMarkup(ctx context.Context, chatID int64, messa
 	if err != nil {
 		return fmt.Errorf("marshal editMessageReplyMarkup: %w", err)
 	}
-	_, err = c.callWithRetry(ctx, c.endpoint("editMessageReplyMarkup"), body)
+	_, err = c.callWithRetry(ctx, c.endpoint("editMessageReplyMarkup"), body, c.chatWait(chatID))
 	return err
 }
