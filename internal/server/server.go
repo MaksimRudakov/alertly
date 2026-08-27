@@ -19,6 +19,10 @@ import (
 	tmpl "github.com/MaksimRudakov/alertly/internal/template"
 )
 
+// maxHeaderBytes caps request headers. Webhook clients send a bearer token
+// and little else; net/http's 1 MB default is far more than needed.
+const maxHeaderBytes = 64 << 10
+
 type Server struct {
 	cfg       config.Server
 	logger    *slog.Logger
@@ -86,10 +90,13 @@ func New(cfg config.Server, deps Deps) *Server {
 		logger:    deps.Logger,
 		readiness: deps.Readiness,
 		srv: &http.Server{
-			Addr:         cfg.ListenAddr,
-			Handler:      root,
-			ReadTimeout:  cfg.ReadTimeout,
-			WriteTimeout: cfg.WriteTimeout,
+			Addr:              cfg.ListenAddr,
+			Handler:           root,
+			ReadTimeout:       cfg.ReadTimeout,
+			WriteTimeout:      cfg.WriteTimeout,
+			IdleTimeout:       cfg.IdleTimeout,
+			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+			MaxHeaderBytes:    maxHeaderBytes,
 		},
 	}
 }
