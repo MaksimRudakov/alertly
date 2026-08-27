@@ -4,6 +4,10 @@ server:
   write_timeout: 30s
   shutdown_timeout: 30s
   max_body_bytes: 1048576
+  # idle_timeout keeps webhook keep-alive connections warm between bursts.
+  idle_timeout: 120s
+  # read_header_timeout cuts off slow-header clients before the full read_timeout.
+  read_header_timeout: 5s
 
 telegram:
   api_url: "https://api.telegram.org"
@@ -58,6 +62,9 @@ updates:
   silence_durations: ["1h", "4h", "24h"]
   label_cache_ttl: 48h
   label_cache_max: 10000
+  # button_tracker_max: bound on the in-memory button/undo trackers
+  # (FIFO eviction; an evicted button behaves like the restart case).
+  button_tracker_max: 10000
   # button_ttl: how long silence buttons stay active on an alert message.
   # After this window the inline keyboard is removed and late clicks are rejected.
   # Allowed range: 2h..48h.
