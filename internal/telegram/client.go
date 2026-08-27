@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/MaksimRudakov/alertly/internal/metrics"
@@ -250,17 +251,19 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) ([]
 		req, err = http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	} else {
 		req, err = http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, c.scrub(fmt.Errorf("build request: %w", err))
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 
 	start := time.Now()
 	resp, err := c.http.Do(req)
 	metrics.TelegramAPIDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
-		return nil, fmt.Errorf("http call: %w", err)
+		return nil, c.scrub(fmt.Errorf("http call: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -269,7 +272,7 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) ([]
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var ar apiResponse
 		if err := json.Unmarshal(respBody, &ar); err == nil && !ar.OK {
-			return nil, &APIError{StatusCode: resp.StatusCode, Body: ar.Description}
+			return nil, c.scrub(&APIError{StatusCode: resp.StatusCode, Body: ar.Description})
 		}
 		return respBody, nil
 	}
@@ -291,7 +294,39 @@ func (c *client) callOnce(ctx context.Context, endpoint string, body []byte) ([]
 			}
 		}
 	}
-	return nil, ae
+	return nil, c.scrub(ae)
+}
+
+// redactedToken is what a bot token is replaced with in error strings.
+const redactedToken = "<redacted>"
+
+// scrubbedError hides the bot token in the message while keeping the original
+// error reachable through errors.Is/As.
+type scrubbedError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+func (e *scrubbedError) Unwrap() error { return e.err }
+
+// scrub removes the bot token from an error message. Telegram authenticates by
+// carrying the token in the request path, and net/http puts the full URL into
+// *url.Error — so without this every network failure writes the bot credentials
+// into the logs (and into the webhook caller's error line).
+func (c *client) scrub(err error) error {
+	return scrubToken(err, c.cfg.Token)
+}
+
+func scrubToken(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, token) {
+		return err
+	}
+	return &scrubbedError{msg: strings.ReplaceAll(msg, token, redactedToken), err: err}
 }
 
 // ThreadIDValue renders an optional topic thread ID for structured logging:

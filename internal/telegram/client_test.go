@@ -1,9 +1,11 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -229,5 +231,90 @@ func TestDryRunSkipsCall(t *testing.T) {
 	}
 	if called {
 		t.Error("DRY_RUN must not call Telegram")
+	}
+}
+
+func TestSendMessageErrorDoesNotLeakToken(t *testing.T) {
+	const token = "123456:AA-super-secret-token"
+	var logs bytes.Buffer
+	c := New(Config{
+		APIURL:         "http://127.0.0.1:1",
+		Token:          token,
+		RequestTimeout: 200 * time.Millisecond,
+		MaxAttempts:    2,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     2 * time.Millisecond,
+	}, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+
+	_, err := c.SendMessage(context.Background(), 1, nil, "hi", nil)
+	if err == nil {
+		t.Fatal("want error from unreachable API")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("bot token leaked into error: %v", err)
+	}
+	if !strings.Contains(err.Error(), redactedToken) {
+		t.Fatalf("want redaction marker in %q", err.Error())
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Fatalf("bot token leaked into logs: %s", logs.String())
+	}
+}
+
+func TestGetUpdatesErrorDoesNotLeakToken(t *testing.T) {
+	const token = "123456:AA-super-secret-token"
+	c := New(Config{
+		APIURL:         "http://127.0.0.1:1",
+		Token:          token,
+		RequestTimeout: 200 * time.Millisecond,
+		MaxAttempts:    1,
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := c.GetUpdates(ctx, 0, 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("want error from unreachable API")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("bot token leaked into error: %v", err)
+	}
+}
+
+func TestScrubTokenKeepsErrorsUnwrappable(t *testing.T) {
+	api := &APIError{StatusCode: 500, Body: "boom secret-token"}
+	wrapped := scrubToken(fmt.Errorf("http call: %w", api), "secret-token")
+	if strings.Contains(wrapped.Error(), "secret-token") {
+		t.Fatalf("token survived scrubbing: %v", wrapped)
+	}
+	var got *APIError
+	if !errors.As(wrapped, &got) || got.StatusCode != 500 {
+		t.Fatalf("errors.As lost the APIError: %v", wrapped)
+	}
+}
+
+func TestAPIErrorBodyIsScrubbed(t *testing.T) {
+	const token = "123456:AA-super-secret-token"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		// Telegram does not normally echo the token, but a proxy in front of it
+		// might: the error must stay safe to log either way.
+		_, _ = io.WriteString(w, `{"ok":false,"description":"Bad Request: bot`+token+` blocked"}`)
+	}))
+	defer srv.Close()
+
+	c := New(Config{APIURL: srv.URL, Token: token, RequestTimeout: time.Second, MaxAttempts: 1}, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	_, err := c.SendMessage(context.Background(), 1, nil, "hi", nil)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked: %v", err)
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest {
+		t.Fatalf("APIError not reachable through the scrubbed error: %v", err)
 	}
 }
