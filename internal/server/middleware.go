@@ -161,3 +161,10 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap exposes the underlying ResponseWriter so http.ResponseController
+// (and anything else that unwraps) can reach optional interfaces — Flusher,
+// deadline setters — through the recorder instead of silently losing them.
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
+}

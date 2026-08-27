@@ -109,3 +109,19 @@ func TestMaxHeaderBytesLeavesRoomForRealClients(t *testing.T) {
 		t.Fatalf("maxHeaderBytes %d too small for realistic auth headers", maxHeaderBytes)
 	}
 }
+
+func TestStatusRecorderUnwrap(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sr := &statusRecorder{ResponseWriter: rec, status: 200}
+	if got := sr.Unwrap(); got != http.ResponseWriter(rec) {
+		t.Fatalf("Unwrap returned %T, want the wrapped writer", got)
+	}
+	// http.ResponseController must reach Flusher through the recorder.
+	rc := http.NewResponseController(sr)
+	if err := rc.Flush(); err != nil {
+		t.Fatalf("ResponseController.Flush through statusRecorder: %v", err)
+	}
+	if !rec.Flushed {
+		t.Fatal("flush did not reach the underlying writer")
+	}
+}
