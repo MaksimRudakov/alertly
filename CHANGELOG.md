@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-28
+
+Re-release of 0.7.0: the runtime is byte-for-byte identical, only the release pipeline is fixed. The v0.7.0 tag run failed while signing the chart tarball, so that release shipped without a chart signature and without the OCI chart in ghcr — use 0.7.1 instead.
+
 ### Fixed
 - Release workflow: chart tarball signing under cosign 3.x (`cosign-installer` v4) — the new default bundle format ignores `--output-signature`/`--output-certificate` and aborted the `chart-release` job; the step now opts out via `--new-bundle-format=false`, keeping the documented `.sig`/`.pem` artifacts.
 
@@ -163,7 +167,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/MaksimRudakov/alertly/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/MaksimRudakov/alertly/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/MaksimRudakov/alertly/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/MaksimRudakov/alertly/compare/v0.4.0...v0.5.0
