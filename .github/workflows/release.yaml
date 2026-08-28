@@ -135,7 +135,13 @@ jobs:
             tag="${name}-${version}"
             tgz="/tmp/${tag}.tgz"
             helm package "$chart" -d /tmp
+            # cosign 3.x (cosign-installer v4) defaults to the new bundle format
+            # and ignores --output-signature/--output-certificate, failing with
+            # "create bundle file: open : no such file or directory". Keep the
+            # legacy .sig/.pem outputs (documented in the README verify steps)
+            # by opting out explicitly.
             cosign sign-blob --yes \
+              --new-bundle-format=false \
               --output-signature "${tgz}.sig" \
               --output-certificate "${tgz}.pem" \
               "${tgz}"

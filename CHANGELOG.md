@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Fixed
+- Release workflow: chart tarball signing under cosign 3.x (`cosign-installer` v4) — the new default bundle format ignores `--output-signature`/`--output-certificate` and aborted the `chart-release` job; the step now opts out via `--new-bundle-format=false`, keeping the documented `.sig`/`.pem` artifacts.
+
 ## [0.7.0] - 2026-08-28
 
 Hardening release: the Telegram delivery path loses three long-standing bugs (token in logs, a retry-deadline mechanism that never fired, message splitting Telegram could reject), every in-memory registry and API call gains a bound, and webhooks get an optional chat allowlist. Backward compatible: every new knob defaults to previous behaviour except the 100-alert payload cap (mirrors the generic source) and tightened HTTP header/timeout defaults.
