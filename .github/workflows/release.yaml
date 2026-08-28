@@ -135,20 +135,20 @@ jobs:
             tag="${name}-${version}"
             tgz="/tmp/${tag}.tgz"
             helm package "$chart" -d /tmp
-            # cosign 3.x (cosign-installer v4) defaults to the new bundle format
-            # and ignores --output-signature/--output-certificate, failing with
-            # "create bundle file: open : no such file or directory". Keep the
-            # legacy .sig/.pem outputs (documented in the README verify steps)
-            # by opting out explicitly.
+            # cosign 3.x (cosign-installer v4) signs keyless through a signing
+            # config and refuses the legacy .sig/.pem outputs there: without a
+            # bundle it fails with "must provide --new-bundle-format or --bundle
+            # where applicable with --signing-config or --use-signing-config"
+            # (and with an empty --bundle path, "create bundle file: open :").
+            # The Sigstore bundle carries both the signature and the certificate.
             cosign sign-blob --yes \
-              --new-bundle-format=false \
-              --output-signature "${tgz}.sig" \
-              --output-certificate "${tgz}.pem" \
+              --new-bundle-format \
+              --bundle "${tgz}.bundle" \
               "${tgz}"
             # skip_existing=true may have skipped the release; only upload if it exists
             if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               gh release upload "$tag" \
-                "${tgz}.sig" "${tgz}.pem" \
+                "${tgz}.bundle" \
                 --repo "$GITHUB_REPOSITORY" --clobber
             fi
           done

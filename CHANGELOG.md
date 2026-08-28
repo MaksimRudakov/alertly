@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-28
+
+Second re-release attempt of 0.7.0 — runtime unchanged again. 0.7.1 still failed to publish its chart signature and OCI chart: opting out of the new bundle format is not possible under cosign 3.x keyless signing (`must provide --new-bundle-format or --bundle ... with --signing-config`).
+
+### Changed
+- **Chart tarball signatures are now Sigstore bundles.** The GitHub Release carries a single `alertly-<version>.tgz.bundle` asset instead of the previous `.tgz.sig` + `.tgz.pem` pair; verify with `cosign verify-blob --bundle alertly-<version>.tgz.bundle --new-bundle-format ...` (see README). Image and OCI chart signatures are unaffected.
+
 ## [0.7.1] - 2026-08-28
 
 Re-release of 0.7.0: the runtime is byte-for-byte identical, only the release pipeline is fixed. The v0.7.0 tag run failed while signing the chart tarball, so that release shipped without a chart signature and without the OCI chart in ghcr — use 0.7.1 instead.
@@ -167,7 +174,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/MaksimRudakov/alertly/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/MaksimRudakov/alertly/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/MaksimRudakov/alertly/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/MaksimRudakov/alertly/compare/v0.5.0...v0.6.0
