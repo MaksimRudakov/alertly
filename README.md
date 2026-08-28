@@ -121,10 +121,10 @@ cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/maksimrudakov/charts/alertly:0.7.0
 
-# .tgz from GitHub Release (download the .tgz, .sig, .pem from the alertly-0.7.0 release)
+# .tgz from GitHub Release (download the .tgz and .tgz.bundle from the alertly-0.7.0 release)
 cosign verify-blob \
-  --certificate alertly-0.7.0.tgz.pem \
-  --signature alertly-0.7.0.tgz.sig \
+  --bundle alertly-0.7.0.tgz.bundle \
+  --new-bundle-format \
   --certificate-identity-regexp "https://github.com/MaksimRudakov/alertly/.github/workflows/release.yaml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   alertly-0.7.0.tgz
