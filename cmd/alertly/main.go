@@ -341,7 +341,6 @@ func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.Readine
 	backoff := time.Second
 	consecFails := 0
 	everReady := false
-	probeUnready := true // startup counts as probe-driven unreadiness
 
 	for {
 		callCtx, cancel := context.WithTimeout(ctx, probeTimeout)
@@ -354,10 +353,16 @@ func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.Readine
 
 		var wait time.Duration
 		if err == nil {
-			if probeUnready {
+			// A successful probe clears unreadiness whoever set it. Restricting
+			// this to probe-driven unreadiness made the send-failure window
+			// self-locking: RecordSendFailure flips the pod unready, the pod
+			// leaves the Service endpoints, no webhook can arrive, so no send
+			// can succeed — and only RecordSendSuccess would have cleared it.
+			// The probe exercises the very API the failed sends went to, so its
+			// success is sufficient evidence the path is usable again.
+			if ready, _ := r.IsReady(); !ready {
 				logger.Info("telegram getMe ok; readiness=ready")
 				r.MarkReady()
-				probeUnready = false
 			}
 			everReady = true
 			consecFails = 0
@@ -372,7 +377,6 @@ func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.Readine
 			)
 			if !everReady || consecFails >= failureThreshold {
 				r.MarkUnready("telegram getMe failed: " + err.Error())
-				probeUnready = true
 			}
 			wait = backoff
 			if backoff < maxBackoff {

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Fixed
+- **A send-failure readiness window no longer locks the pod out permanently.** Ten consecutive server/network errors on the send path flip readiness off (`telegram api: too many consecutive 5xx errors`); until now only `RecordSendSuccess` could clear that, and a successful `getMe` probe was ignored because it only re-armed *probe-driven* unreadiness. That was self-locking: unready removes the pod from the Service endpoints, so Alertmanager cannot deliver a webhook, so no send can succeed — observed in a live cluster as a pod sitting unready for four days after a transient Telegram outage, with `getMe` succeeding every minute the whole time. A successful probe now clears unreadiness whoever set it.
+
 ## [0.7.2] - 2026-08-28
 
 Second re-release attempt of 0.7.0 — runtime unchanged again. 0.7.1 still failed to publish its chart signature and OCI chart: opting out of the new bundle format is not possible under cosign 3.x keyless signing (`must provide --new-bundle-format or --bundle ... with --signing-config`).
