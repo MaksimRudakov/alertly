@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-04
+
+A single-fix release: a pod that hit the send-failure readiness window could stay unready forever, taking the whole webhook path down until someone restarted it by hand. Anyone running 0.7.x should upgrade.
+
 ### Fixed
 - **A send-failure readiness window no longer locks the pod out permanently.** Ten consecutive server/network errors on the send path flip readiness off (`telegram api: too many consecutive 5xx errors`); until now only `RecordSendSuccess` could clear that, and a successful `getMe` probe was ignored because it only re-armed *probe-driven* unreadiness. That was self-locking: unready removes the pod from the Service endpoints, so Alertmanager cannot deliver a webhook, so no send can succeed — observed in a live cluster as a pod sitting unready for four days after a transient Telegram outage, with `getMe` succeeding every minute the whole time. A successful probe now clears unreadiness whoever set it.
 
@@ -177,7 +181,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/MaksimRudakov/alertly/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/MaksimRudakov/alertly/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/MaksimRudakov/alertly/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/MaksimRudakov/alertly/compare/v0.6.0...v0.7.0
