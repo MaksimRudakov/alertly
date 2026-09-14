@@ -1,13 +1,13 @@
 module github.com/MaksimRudakov/alertly
 
-go 1.25.0
+go 1.26.0
 
 toolchain go1.26.6
 
 require (
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.24.1
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
