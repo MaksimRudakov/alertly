@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Fixed
+- **The chart `.tgz` attached to GitHub Releases now verifies against its Sigstore bundle.** Since 0.7.2 the release workflow signed a second `helm package` of the chart instead of the tarball chart-releaser had attached to the release, and the two differ byte-wise — so `cosign verify-blob` against `alertly-<version>.tgz` failed with `invalid signature` for 0.7.2–0.7.4 (image and OCI chart signatures were never affected). The workflow now signs and pushes to OCI the exact release asset, verifies the bundle before publishing it, and fails the release if the OCI chart and the release asset differ. For 0.7.2–0.7.4, verify the chart via OCI instead.
+
 ## [0.7.4] - 2026-09-24
 
 Hardening release for the interactive path plus a dependency refresh. Backward compatible; one action item: if your values override `templates.*`, escape link URLs as `href="{{ escape_html .URL }}"` — the quote fix below only applies to templates that do.

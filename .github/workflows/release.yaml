@@ -129,12 +129,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Sign the exact .tgz chart-releaser attached to the GitHub Release
+          # (and indexed in gh-pages with its digest), and push that same file
+          # to OCI in the next step. Re-running `helm package` here produced a
+          # tarball with different bytes, so the published bundle never
+          # verified against the release asset (0.7.2-0.7.4).
+          pkgdir="${RUNNER_TEMP}/charts"
+          mkdir -p "${pkgdir}"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@${GITHUB_REF}"
           for chart in charts/*/; do
             name=$(basename "$chart")
             version=$(grep '^version:' "$chart/Chart.yaml" | awk '{print $2}')
             tag="${name}-${version}"
-            tgz="/tmp/${tag}.tgz"
-            helm package "$chart" -d /tmp
+            tgz="${pkgdir}/${tag}.tgz"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+                --pattern "${tag}.tgz" --dir "${pkgdir}" --clobber
+            else
+              echo "::warning::no GitHub Release ${tag}; packaging locally for OCI only"
+              helm package "$chart" -d "${pkgdir}"
+            fi
             # cosign 3.x (cosign-installer v4) signs keyless through a signing
             # config and refuses the legacy .sig/.pem outputs there: without a
             # bundle it fails with "must provide --new-bundle-format or --bundle
@@ -145,7 +159,13 @@ jobs:
               --new-bundle-format \
               --bundle "${tgz}.bundle" \
               "${tgz}"
-            # skip_existing=true may have skipped the release; only upload if it exists
+            # Fail the release if what users download does not verify.
+            cosign verify-blob \
+              --new-bundle-format \
+              --bundle "${tgz}.bundle" \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${tgz}"
             if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               gh release upload "$tag" \
                 "${tgz}.bundle" \
@@ -160,12 +180,21 @@ jobs:
           # ghcr.io requires a lowercase repository path; github.repository_owner
           # preserves the original casing, so lower-case it explicitly.
           owner_lc=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          pkgdir="${RUNNER_TEMP}/charts"
           helm registry login ghcr.io -u "$GITHUB_ACTOR" -p "${{ secrets.GITHUB_TOKEN }}"
           for chart in charts/*/; do
             name=$(basename "$chart")
             version=$(grep '^version:' "$chart/Chart.yaml" | awk '{print $2}')
-            tgz="/tmp/${name}-${version}.tgz"
+            tgz="${pkgdir}/${name}-${version}.tgz"
             push_out=$(helm push "${tgz}" "oci://ghcr.io/${owner_lc}/charts" 2>&1 | tee /dev/stderr)
             digest=$(printf '%s' "$push_out" | grep -oE 'sha256:[a-f0-9]{64}' | head -n1)
             cosign sign --yes "ghcr.io/${owner_lc}/charts/${name}@${digest}"
+            # OCI and the GitHub Release must serve byte-identical charts.
+            pulled="${RUNNER_TEMP}/oci-pull"
+            rm -rf "${pulled}" && mkdir -p "${pulled}"
+            helm pull "oci://ghcr.io/${owner_lc}/charts/${name}" --version "${version}" -d "${pulled}"
+            if ! cmp -s "${tgz}" "${pulled}/${name}-${version}.tgz"; then
+              echo "::error::OCI chart ${name}-${version} differs from the release asset"
+              exit 1
+            fi
           done
