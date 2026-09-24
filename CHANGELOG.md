@@ -6,8 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
-### Fixed
-- **A rolling update no longer logs a `getUpdates` conflict as an error.** Since #45 every `409 Conflict` was logged at `error` level as «another instance is polling», but a deploy always produces a few: the old and the new pod long-poll at once until the old one exits. Conflicts are now warnings until a streak lasts over 2 minutes (a genuine second poller); the `reason="conflict"` counter still counts every one.
+## [0.7.4] - 2026-09-24
+
+Hardening release for the interactive path plus a dependency refresh. Backward compatible; one action item: if your values override `templates.*`, escape link URLs as `href="{{ escape_html .URL }}"` — the quote fix below only applies to templates that do.
 
 ### Fixed
 - **Silence buttons no longer break on a large Alertmanager.** Label lookup listed every alert in AM and read at most 1 MiB of the response; beyond roughly a thousand alerts the JSON was truncated, decoding failed and every press answered «Failed to query Alertmanager» — the label cache was consulted only for «not found». The lookup is now narrowed server-side by the cached `alertname` (`filter=alertname="…"`), the response cap is 8 MiB with an explicit «response exceeds» error, and any AM failure falls back to the cached labels.
@@ -17,8 +18,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - **A button press must match the message it came from.** The callback handler checked only that the message was tracked; the fingerprint (or Undo silence ID) in `callback_data` was trusted as-is. It is now compared with what alertly attached to that message, and a mismatch is refused without querying Alertmanager.
 
 ### Added
-- **`409 Conflict` from `getUpdates` is reported as such**: an `error` log line `another instance is polling this bot token` and `alertly_updates_poll_errors_total{reason="conflict"}` (previously a generic `api_4xx` warning). Telegram allows one poller per bot token; a second one silently splits button presses.
+- **`409 Conflict` from `getUpdates` is reported as such** (previously a generic `api_4xx` warning). Telegram allows one poller per bot token; a second one silently splits button presses. The few conflicts of a rolling update (old and new pod overlap for seconds) are logged as warnings; a streak lasting over 2 minutes is logged as an error `another instance is polling this bot token`. Every conflict counts in `alertly_updates_poll_errors_total{reason="conflict"}` — alert on a sustained rate, not a single increment.
 - Helm chart: rendering fails for `replicaCount > 1` with `config.updates.enabled=true`, for the same reason.
+
+### Changed
+- Go dependencies: `golang.org/x/time` 0.15.0 → 0.16.0, `prometheus/client_model` 0.6.2 → 0.6.3, `google.golang.org/protobuf` 1.36.11 → 1.36.12. `x/time` 0.16.0 requires Go 1.26, so the `go` directive moves 1.25.0 → 1.26.0 (only matters when building from source; the toolchain was already 1.26).
+- `distroless/static-debian12:nonroot` base image digest refreshed (`f5b485e` → `afa5c87`).
+- GitHub Actions bumped: codecov 7.1.1, docker/setup-buildx 4.4.1, docker/build-push 7.4.0, docker/setup-qemu 4.4.0, helm/kind 1.15.0, codeql-action 4.38.1.
 
 ## [0.7.3] - 2026-09-04
 
@@ -195,7 +201,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/MaksimRudakov/alertly/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/MaksimRudakov/alertly/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/MaksimRudakov/alertly/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/MaksimRudakov/alertly/compare/v0.7.0...v0.7.1
