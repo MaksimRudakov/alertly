@@ -11,9 +11,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 Hardening release for the interactive path plus a dependency refresh. Backward compatible; one action item: if your values override `templates.*`, escape link URLs as `href="{{ escape_html .URL }}"` — the quote fix below only applies to templates that do.
 
 ### Fixed
-- **A rolling update no longer logs a `getUpdates` conflict as an error.** Since #45 every `409 Conflict` was logged at `error` level as «another instance is polling», but a deploy always produces a few: the old and the new pod long-poll at once until the old one exits. Conflicts are now warnings until a streak lasts over 2 minutes (a genuine second poller); the `reason="conflict"` counter still counts every one.
-
-### Fixed
 - **Silence buttons no longer break on a large Alertmanager.** Label lookup listed every alert in AM and read at most 1 MiB of the response; beyond roughly a thousand alerts the JSON was truncated, decoding failed and every press answered «Failed to query Alertmanager» — the label cache was consulted only for «not found». The lookup is now narrowed server-side by the cached `alertname` (`filter=alertname="…"`), the response cap is 8 MiB with an explicit «response exceeds» error, and any AM failure falls back to the cached labels.
 - **Messages with a `"` in a link URL are no longer lost.** `escape_html` now also escapes `"` (`&quot;`), and the shipped templates (chart `values.yaml`, `examples/config.yaml`) escape `.URL` inside `href`. Previously a quote in `runbook_url` ended the attribute early and Telegram rejected the whole message with `can't parse entities` — a 4xx that is never retried.
 
@@ -21,7 +18,7 @@ Hardening release for the interactive path plus a dependency refresh. Backward c
 - **A button press must match the message it came from.** The callback handler checked only that the message was tracked; the fingerprint (or Undo silence ID) in `callback_data` was trusted as-is. It is now compared with what alertly attached to that message, and a mismatch is refused without querying Alertmanager.
 
 ### Added
-- **`409 Conflict` from `getUpdates` is reported as such**: an `error` log line `another instance is polling this bot token` and `alertly_updates_poll_errors_total{reason="conflict"}` (previously a generic `api_4xx` warning). Telegram allows one poller per bot token; a second one silently splits button presses.
+- **`409 Conflict` from `getUpdates` is reported as such** (previously a generic `api_4xx` warning). Telegram allows one poller per bot token; a second one silently splits button presses. The few conflicts of a rolling update (old and new pod overlap for seconds) are logged as warnings; a streak lasting over 2 minutes is logged as an error `another instance is polling this bot token`. Every conflict counts in `alertly_updates_poll_errors_total{reason="conflict"}` — alert on a sustained rate, not a single increment.
 - Helm chart: rendering fails for `replicaCount > 1` with `config.updates.enabled=true`, for the same reason.
 
 ### Changed
