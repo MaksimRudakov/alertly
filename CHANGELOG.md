@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-09-24
+
+Hardening release for the interactive path plus a dependency refresh. Backward compatible; one action item: if your values override `templates.*`, escape link URLs as `href="{{ escape_html .URL }}"` — the quote fix below only applies to templates that do.
+
 ### Fixed
 - **Silence buttons no longer break on a large Alertmanager.** Label lookup listed every alert in AM and read at most 1 MiB of the response; beyond roughly a thousand alerts the JSON was truncated, decoding failed and every press answered «Failed to query Alertmanager» — the label cache was consulted only for «not found». The lookup is now narrowed server-side by the cached `alertname` (`filter=alertname="…"`), the response cap is 8 MiB with an explicit «response exceeds» error, and any AM failure falls back to the cached labels.
 - **Messages with a `"` in a link URL are no longer lost.** `escape_html` now also escapes `"` (`&quot;`), and the shipped templates (chart `values.yaml`, `examples/config.yaml`) escape `.URL` inside `href`. Previously a quote in `runbook_url` ended the attribute early and Telegram rejected the whole message with `can't parse entities` — a 4xx that is never retried.
@@ -16,6 +20,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### Added
 - **`409 Conflict` from `getUpdates` is reported as such**: an `error` log line `another instance is polling this bot token` and `alertly_updates_poll_errors_total{reason="conflict"}` (previously a generic `api_4xx` warning). Telegram allows one poller per bot token; a second one silently splits button presses.
 - Helm chart: rendering fails for `replicaCount > 1` with `config.updates.enabled=true`, for the same reason.
+
+### Changed
+- Go dependencies: `golang.org/x/time` 0.15.0 → 0.16.0, `prometheus/client_model` 0.6.2 → 0.6.3, `google.golang.org/protobuf` 1.36.11 → 1.36.12. `x/time` 0.16.0 requires Go 1.26, so the `go` directive moves 1.25.0 → 1.26.0 (only matters when building from source; the toolchain was already 1.26).
+- `distroless/static-debian12:nonroot` base image digest refreshed (`f5b485e` → `afa5c87`).
+- GitHub Actions bumped: codecov 7.1.1, docker/setup-buildx 4.4.1, docker/build-push 7.4.0, docker/setup-qemu 4.4.0, helm/kind 1.15.0, codeql-action 4.38.1.
 
 ## [0.7.3] - 2026-09-04
 
@@ -192,7 +201,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/MaksimRudakov/alertly/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/MaksimRudakov/alertly/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/MaksimRudakov/alertly/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/MaksimRudakov/alertly/compare/v0.7.0...v0.7.1
