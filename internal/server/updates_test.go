@@ -404,13 +404,13 @@ func TestUpdatesPoller_ConflictIsReported(t *testing.T) {
 	done := make(chan struct{})
 	go func() { poller.Run(ctx); close(done) }()
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(logs.String(), "another instance is polling") {
+	for time.Now().Before(deadline) && !strings.Contains(logs.String(), "getUpdates conflict") {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	if !strings.Contains(logs.String(), "another instance is polling") {
+	if !strings.Contains(logs.String(), "getUpdates conflict") {
 		t.Fatalf("conflict not reported in logs:\n%s", logs.String())
 	}
 	if got := counterValue(t, "conflict") - before; got < 1 {
@@ -425,4 +425,39 @@ func counterValue(t *testing.T, reason string) float64 {
 		t.Fatal(err)
 	}
 	return m.GetCounter().GetValue()
+}
+
+// A rolling update makes the old and new pod poll at once for a few seconds;
+// that must stay a warning. Only a conflict streak longer than
+// conflictPersistAfter is an error.
+func TestReportConflict_EscalatesOnlyWhenPersistent(t *testing.T) {
+	logs := &syncBuffer{}
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	p := &UpdatesPoller{
+		Logger: slog.New(slog.NewTextHandler(logs, nil)),
+		now:    func() time.Time { return now },
+	}
+	errConflict := &telegram.APIError{StatusCode: http.StatusConflict}
+
+	for i := 0; i < 5; i++ { // rollout overlap: a burst within seconds
+		p.reportConflict(errConflict, time.Second)
+		now = now.Add(2 * time.Second)
+	}
+	if strings.Contains(logs.String(), "level=ERROR") {
+		t.Fatalf("short conflict burst must not be an error:\n%s", logs.String())
+	}
+
+	now = now.Add(conflictPersistAfter)
+	p.reportConflict(errConflict, time.Second)
+	if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "another instance is polling") {
+		t.Fatalf("persistent conflict must be an error:\n%s", logs.String())
+	}
+
+	// After a quiet gap the streak restarts: next conflict is a warning again.
+	before := strings.Count(logs.String(), "level=ERROR")
+	now = now.Add(conflictStreakGap + time.Second)
+	p.reportConflict(errConflict, time.Second)
+	if strings.Count(logs.String(), "level=ERROR") != before {
+		t.Errorf("conflict after a quiet gap must start a new streak:\n%s", logs.String())
+	}
 }
