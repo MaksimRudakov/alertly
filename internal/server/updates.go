@@ -28,7 +28,23 @@ type UpdatesPoller struct {
 	HandleTimeout time.Duration
 
 	offset int64
+
+	// conflictSince/lastConflict track a streak of 409 Conflict responses so
+	// the expected overlap of a rolling update is not reported as an error.
+	conflictSince time.Time
+	lastConflict  time.Time
+	now           func() time.Time
 }
+
+const (
+	// conflictPersistAfter separates the rollout overlap (old and new pod poll
+	// for a few seconds until the old one exits) from a genuine second
+	// poller, which conflicts indefinitely.
+	conflictPersistAfter = 2 * time.Minute
+	// conflictStreakGap ends a streak: a conflict after this much quiet
+	// starts a new one.
+	conflictStreakGap = 5 * time.Minute
+)
 
 func (p *UpdatesPoller) Run(ctx context.Context) {
 	backoff := time.Second
@@ -67,8 +83,7 @@ func (p *UpdatesPoller) Run(ctx context.Context) {
 			// between the two.
 			if ae != nil && ae.Status() == http.StatusConflict {
 				reason = "conflict"
-				p.Logger.Error("getUpdates conflict: another instance is polling this bot token; silence buttons and commands will misbehave until it stops",
-					"err", err, "backoff", backoff)
+				p.reportConflict(err, backoff)
 			} else {
 				p.Logger.Warn("getUpdates failed", "err", err, "backoff", backoff)
 			}
@@ -109,6 +124,28 @@ func (p *UpdatesPoller) Run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// reportConflict logs a 409 from getUpdates. A short streak is the normal
+// rolling-update overlap and stays a warning; one lasting conflictPersistAfter
+// means another process keeps polling this bot token.
+func (p *UpdatesPoller) reportConflict(err error, backoff time.Duration) {
+	now := time.Now()
+	if p.now != nil {
+		now = p.now()
+	}
+	if p.conflictSince.IsZero() || now.Sub(p.lastConflict) > conflictStreakGap {
+		p.conflictSince = now
+	}
+	p.lastConflict = now
+
+	if streak := now.Sub(p.conflictSince); streak >= conflictPersistAfter {
+		p.Logger.Error("getUpdates conflict persists: another instance is polling this bot token; silence buttons and commands will misbehave until it stops",
+			"err", err, "streak", streak.Truncate(time.Second), "backoff", backoff)
+		return
+	}
+	p.Logger.Warn("getUpdates conflict (expected briefly during a rolling update)",
+		"err", err, "backoff", backoff)
 }
 
 // dispatch runs one update handler under the per-update timeout and a panic
