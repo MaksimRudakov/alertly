@@ -80,6 +80,9 @@ func TestEscapeHTML(t *testing.T) {
 	if got := EscapeHTML("a & <b> c"); got != "a &amp; &lt;b&gt; c" {
 		t.Errorf("escape: %q", got)
 	}
+	if got := EscapeHTML(`https://wiki/x?q="a"&b=1`); got != "https://wiki/x?q=&quot;a&quot;&amp;b=1" {
+		t.Errorf("escape attribute value: %q", got)
+	}
 }
 
 func TestTruncate(t *testing.T) {

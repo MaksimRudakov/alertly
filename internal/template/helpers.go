@@ -29,13 +29,19 @@ func SeverityEmoji(sev string) string {
 	}
 }
 
+// htmlEscaper covers text and double-quoted attribute values alike, the only
+// attribute form Telegram's HTML mode uses (<a href="...">). A bare quote in
+// an href ends the attribute early and Telegram rejects the whole message
+// with "can't parse entities" — a 4xx that is never retried.
+var htmlEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+)
+
 func EscapeHTML(s string) string {
-	r := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-	)
-	return r.Replace(s)
+	return htmlEscaper.Replace(s)
 }
 
 func Truncate(s string, n int) string {

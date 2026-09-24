@@ -157,7 +157,7 @@ func (f *fakeAM) AlertsOverview(context.Context, string) (alertmanager.AlertsOve
 	return f.overview, nil
 }
 
-func (f *fakeAM) GetAlertLabels(_ context.Context, fp string) (map[string]string, error) {
+func (f *fakeAM) GetAlertLabels(_ context.Context, fp, _ string) (map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.getAlertCalls++
@@ -194,10 +194,11 @@ func (f *fakeAM) DeleteSilence(_ context.Context, id string) error {
 // --- tests -----------------------------------------------------------------
 
 func newHandler(tg *fakeTG, am *fakeAM, cache *alertmanager.LabelCache, chats, users []int64) *CallbackHandler {
-	// Tracker keys by (chat_id, message_id); the fingerprint stored here does
-	// not need to match the one in callback_data.
+	// The callback handler requires callback_data to carry the fingerprint
+	// tracked for the message; tests press buttons for fp1 unless they
+	// re-register another one.
 	tracker := NewButtonTracker(time.Hour, 0)
-	tracker.Register(-100, 42, "any")
+	tracker.Register(-100, 42, "fp1")
 	return NewCallbackHandler(CallbackDeps{
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Telegram:      tg,
@@ -250,6 +251,7 @@ func TestCallback_FallbackToCache(t *testing.T) {
 	cache.Put("fp-resolved", map[string]string{"alertname": "Gone"})
 	h := newHandler(tg, am, cache, []int64{-100}, nil)
 
+	h.deps.Tracker.Register(-100, 42, "fp-resolved")
 	h.Handle(context.Background(), mkCallback("s|fp-resolved|1h", -100, 1))
 
 	if len(am.createdReqs) != 1 {
@@ -259,10 +261,10 @@ func TestCallback_FallbackToCache(t *testing.T) {
 
 func TestCallback_RejectsUnlistedChat(t *testing.T) {
 	tg := &fakeTG{}
-	am := &fakeAM{labels: map[string]map[string]string{"fp": {"a": "1"}}}
+	am := &fakeAM{labels: map[string]map[string]string{"fp1": {"a": "1"}}}
 	h := newHandler(tg, am, nil, []int64{-100}, nil)
 
-	h.Handle(context.Background(), mkCallback("s|fp|1h", -999, 1))
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -999, 1))
 
 	if len(am.createdReqs) != 0 {
 		t.Error("silence must not be created from unlisted chat")
@@ -274,10 +276,10 @@ func TestCallback_RejectsUnlistedChat(t *testing.T) {
 
 func TestCallback_RejectsUnlistedUser(t *testing.T) {
 	tg := &fakeTG{}
-	am := &fakeAM{labels: map[string]map[string]string{"fp": {"a": "1"}}}
+	am := &fakeAM{labels: map[string]map[string]string{"fp1": {"a": "1"}}}
 	h := newHandler(tg, am, nil, []int64{-100}, []int64{999})
 
-	h.Handle(context.Background(), mkCallback("s|fp|1h", -100, 1))
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
 
 	if len(am.createdReqs) != 0 {
 		t.Error("silence must not be created for unlisted user")
@@ -286,10 +288,10 @@ func TestCallback_RejectsUnlistedUser(t *testing.T) {
 
 func TestCallback_InvalidDuration(t *testing.T) {
 	tg := &fakeTG{}
-	am := &fakeAM{labels: map[string]map[string]string{"fp": {"a": "1"}}}
+	am := &fakeAM{labels: map[string]map[string]string{"fp1": {"a": "1"}}}
 	h := newHandler(tg, am, nil, []int64{-100}, nil)
 
-	h.Handle(context.Background(), mkCallback("s|fp|99h", -100, 1))
+	h.Handle(context.Background(), mkCallback("s|fp1|99h", -100, 1))
 
 	if len(am.createdReqs) != 0 {
 		t.Error("unsupported duration must not create silence")
@@ -305,6 +307,7 @@ func TestCallback_AlertNotFound(t *testing.T) {
 	cache := alertmanager.NewLabelCache(time.Hour, 10)
 	h := newHandler(tg, am, cache, []int64{-100}, nil)
 
+	h.deps.Tracker.Register(-100, 42, "fp-unknown")
 	h.Handle(context.Background(), mkCallback("s|fp-unknown|1h", -100, 1))
 
 	if len(am.createdReqs) != 0 {
@@ -315,14 +318,14 @@ func TestCallback_AlertNotFound(t *testing.T) {
 func TestCallback_AMErrorPropagates(t *testing.T) {
 	tg := &fakeTG{}
 	am := &fakeAM{
-		labels: map[string]map[string]string{"fp": {"a": "1"}},
+		labels: map[string]map[string]string{"fp1": {"a": "1"}},
 		silenceErr: &alertmanager.APIError{
 			StatusCode: 400, Body: "bad matcher",
 		},
 	}
 	h := newHandler(tg, am, nil, []int64{-100}, nil)
 
-	h.Handle(context.Background(), mkCallback("s|fp|1h", -100, 1))
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
 
 	if len(tg.editedMarkups) != 0 {
 		t.Error("markup must not be stripped when silence failed")
@@ -336,7 +339,7 @@ func TestCallback_GetLabelsErrorPropagates(t *testing.T) {
 	tg := &fakeTG{}
 	am := &fakeAM{getErr: errors.New("boom")}
 	h := newHandler(tg, am, nil, []int64{-100}, nil)
-	h.Handle(context.Background(), mkCallback("s|fp|1h", -100, 1))
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
 	if len(am.createdReqs) != 0 {
 		t.Error("silence must not be created if GetAlertLabels errors")
 	}
@@ -357,7 +360,7 @@ func TestCallback_InvalidDataNoSilence(t *testing.T) {
 
 func TestCallback_ExpiredWindow(t *testing.T) {
 	tg := &fakeTG{}
-	am := &fakeAM{labels: map[string]map[string]string{"fp": {"a": "1"}}}
+	am := &fakeAM{labels: map[string]map[string]string{"fp1": {"a": "1"}}}
 	// Build a handler with an empty tracker — simulating expired / unknown message.
 	tracker := NewButtonTracker(time.Hour, 0)
 	h := NewCallbackHandler(CallbackDeps{
@@ -369,7 +372,7 @@ func TestCallback_ExpiredWindow(t *testing.T) {
 		ChatAllowlist: []int64{-100},
 		Durations:     map[string]time.Duration{"1h": time.Hour},
 	})
-	h.Handle(context.Background(), mkCallback("s|fp|1h", -100, 1))
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
 
 	if len(am.createdReqs) != 0 {
 		t.Error("expired window must not create silence")
@@ -384,9 +387,9 @@ func TestCallback_ExpiredWindow(t *testing.T) {
 
 func TestCallback_ConsumeOnSuccess(t *testing.T) {
 	tg := &fakeTG{}
-	am := &fakeAM{labels: map[string]map[string]string{"fp": {"a": "1"}}}
+	am := &fakeAM{labels: map[string]map[string]string{"fp1": {"a": "1"}}}
 	tracker := NewButtonTracker(time.Hour, 0)
-	tracker.Register(-100, 42, "fp")
+	tracker.Register(-100, 42, "fp1")
 
 	h := NewCallbackHandler(CallbackDeps{
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -397,7 +400,7 @@ func TestCallback_ConsumeOnSuccess(t *testing.T) {
 		ChatAllowlist: []int64{-100},
 		Durations:     map[string]time.Duration{"1h": time.Hour},
 	})
-	h.Handle(context.Background(), mkCallback("s|fp|1h", -100, 1))
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
 
 	if tracker.Valid(-100, 42) {
 		t.Error("tracker entry must be consumed after successful silence")
@@ -417,7 +420,7 @@ func TestSilenceCreatedBy(t *testing.T) {
 
 func newUndoHandler(tg *fakeTG, am *fakeAM, matchers []string) (*CallbackHandler, *ButtonTracker) {
 	tracker := NewButtonTracker(time.Hour, 0)
-	tracker.Register(-100, 42, "any")
+	tracker.Register(-100, 42, "fp1")
 	undo := NewButtonTracker(5*time.Minute, 0)
 	h := NewCallbackHandler(CallbackDeps{
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -550,5 +553,62 @@ func TestCallback_UndoDisabled_KeyboardStripped(t *testing.T) {
 
 	if len(tg.editedMarkups) != 1 || tg.editedMarkups[0].Markup != nil {
 		t.Errorf("with undo disabled the keyboard must be stripped, got %+v", tg.editedMarkups)
+	}
+}
+
+func TestCallback_FingerprintMismatchRejected(t *testing.T) {
+	tg := &fakeTG{}
+	am := &fakeAM{labels: map[string]map[string]string{
+		"fp1":    {"alertname": "X"},
+		"forged": {"alertname": "Everything"},
+	}}
+	h := newHandler(tg, am, nil, []int64{-100}, nil)
+
+	h.Handle(context.Background(), mkCallback("s|forged|1h", -100, 1))
+
+	if len(am.createdReqs) != 0 {
+		t.Fatalf("silence must not be created for a fingerprint the message does not carry, got %d", len(am.createdReqs))
+	}
+	if am.getAlertCalls != 0 {
+		t.Errorf("AM must not be queried, got %d calls", am.getAlertCalls)
+	}
+	if len(tg.answers) != 1 || !tg.answers[0].ShowAlert {
+		t.Errorf("expected alert answer, got %+v", tg.answers)
+	}
+}
+
+func TestCallback_UndoSilenceMismatchRejected(t *testing.T) {
+	tg := &fakeTG{}
+	am := &fakeAM{
+		labels:    map[string]map[string]string{"fp1": {"alertname": "X"}},
+		silenceID: "sil-42",
+	}
+	h, undo := newUndoHandler(tg, am, nil)
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
+
+	h.Handle(context.Background(), mkCallback("u|sil-other|-", -100, 1))
+
+	if len(am.deletedIDs) != 0 {
+		t.Fatalf("foreign silence must not be deleted, got %v", am.deletedIDs)
+	}
+	if !undo.Valid(-100, 42) {
+		t.Error("undo entry must survive a mismatched press")
+	}
+}
+
+func TestCallback_AMFailureFallsBackToCache(t *testing.T) {
+	tg := &fakeTG{}
+	am := &fakeAM{getErr: errors.New("decode alerts: unexpected EOF")}
+	cache := alertmanager.NewLabelCache(time.Hour, 10)
+	cache.Put("fp1", map[string]string{"alertname": "X", "namespace": "prod"})
+	h := newHandler(tg, am, cache, []int64{-100}, nil)
+
+	h.Handle(context.Background(), mkCallback("s|fp1|1h", -100, 1))
+
+	if len(am.createdReqs) != 1 {
+		t.Fatalf("expected silence from cached labels on AM failure, got %d", len(am.createdReqs))
+	}
+	if len(am.createdReqs[0].Matchers) != 2 {
+		t.Errorf("matchers: %+v", am.createdReqs[0].Matchers)
 	}
 }

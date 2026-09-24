@@ -9,11 +9,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/MaksimRudakov/alertly/internal/alertmanager"
+	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 )
 
@@ -356,4 +360,69 @@ func TestUpdatesPoller_SurvivesPanickingHandler(t *testing.T) {
 	if got := getUpdatesCalls.Load(); got < 3 {
 		t.Fatalf("poller died after panic: only %d polls", got)
 	}
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// Telegram answers 409 when a second consumer polls the same bot token. The
+// poller must name that cause instead of reporting a generic 4xx.
+func TestUpdatesPoller_ConflictIsReported(t *testing.T) {
+	tgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":409,"description":"Conflict: terminated by other getUpdates request"}`)
+	}))
+	defer tgSrv.Close()
+
+	logs := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	tg := telegram.New(telegram.Config{APIURL: tgSrv.URL, Token: "t", RequestTimeout: time.Second, MaxAttempts: 1},
+		telegram.NewLimiter(1000, 1000), logger)
+	poller := &UpdatesPoller{
+		Client:      tg,
+		Handler:     NewCallbackHandler(CallbackDeps{Logger: logger, Telegram: tg}),
+		Logger:      logger,
+		PollTimeout: 50 * time.Millisecond,
+	}
+
+	before := counterValue(t, "conflict")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { poller.Run(ctx); close(done) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(logs.String(), "another instance is polling") {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if !strings.Contains(logs.String(), "another instance is polling") {
+		t.Fatalf("conflict not reported in logs:\n%s", logs.String())
+	}
+	if got := counterValue(t, "conflict") - before; got < 1 {
+		t.Errorf("conflict metric delta = %v, want >= 1", got)
+	}
+}
+
+func counterValue(t *testing.T, reason string) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := metrics.UpdatesPollErrors.WithLabelValues(reason).Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m.GetCounter().GetValue()
 }

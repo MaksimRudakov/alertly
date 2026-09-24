@@ -97,6 +97,26 @@ func (t *ButtonTracker) Valid(chatID, messageID int64) bool {
 	return t.now().Before(el.Value.(*buttonEntry).ExpiresAt)
 }
 
+// Lookup returns the fingerprint (or, for the undo tracker, the silence ID)
+// recorded for a message still within its window. ok is false in the same
+// cases Valid reports false.
+func (t *ButtonTracker) Lookup(chatID, messageID int64) (fingerprint string, ok bool) {
+	if t == nil {
+		return "", false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	el, found := t.entries[buttonKey{ChatID: chatID, MessageID: messageID}]
+	if !found {
+		return "", false
+	}
+	entry := el.Value.(*buttonEntry)
+	if !t.now().Before(entry.ExpiresAt) {
+		return "", false
+	}
+	return entry.Fingerprint, true
+}
+
 // Consume removes an entry (typically called after a successful silence so the
 // sweeper does not re-edit an already-stripped message). Safe to call on
 // missing entries.

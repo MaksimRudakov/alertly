@@ -29,7 +29,7 @@ templates:
     {{ severity_emoji .Severity }} <b>{{ escape_html .Title }}</b>
     {{ if .Body }}{{ escape_html .Body }}{{ end }}
     {{- range .Links }}
-    <a href="{{ .URL }}">{{ escape_html .Title }}</a>{{ end }}
+    <a href="{{ escape_html .URL }}">{{ escape_html .Title }}</a>{{ end }}
   alertmanager: |
     <b>{{ escape_html .Title }}</b>
     <b>Status:</b> {{ if eq .Status "firing" }}Firing 🔥{{ else if eq .Status "resolved" }}Resolved ✅{{ else }}{{ escape_html .Status }}{{ end }}
@@ -37,7 +37,7 @@ templates:
     {{ escape_html .Body }}
     {{- end }}
     {{- range .Links }}
-    <a href="{{ .URL }}">{{ escape_html .Title }} URL</a>
+    <a href="{{ escape_html .URL }}">{{ escape_html .Title }} URL</a>
     {{- end }}
 
     <b>Alert Name:</b> {{ escape_html (index .Labels "alertname") }}

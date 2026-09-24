@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -34,7 +35,9 @@ func (a Auth) apply(req *http.Request) {
 }
 
 type Client interface {
-	GetAlertLabels(ctx context.Context, fingerprint string) (map[string]string, error)
+	// GetAlertLabels finds an alert by fingerprint. A non-empty alertname
+	// narrows the query server-side (AM has no fingerprint filter).
+	GetAlertLabels(ctx context.Context, fingerprint, alertname string) (map[string]string, error)
 	CreateSilence(ctx context.Context, req SilenceRequest) (string, error)
 	DeleteSilence(ctx context.Context, silenceID string) error
 	Status(ctx context.Context) (StatusInfo, error)
@@ -170,10 +173,15 @@ func (c *client) doWithRetry(ctx context.Context, maxBody int64, build func() (*
 	return 0, nil, lastErr
 }
 
-// fetchAlerts retrieves active+silenced+inhibited alerts. AM v2 API does not
-// expose a fingerprint filter, so callers match client-side; typical alert
-// volume makes this acceptable.
-func (c *client) fetchAlerts(ctx context.Context) ([]alert, error) {
+// maxAlertsBody bounds GET /api/v2/alerts. A few thousand alerts with
+// annotations fit comfortably; a larger response is reported as such instead
+// of failing later as truncated JSON.
+const maxAlertsBody = 8 << 20
+
+// fetchAlerts retrieves active+silenced+inhibited alerts, optionally narrowed
+// by AM matchers (`filter` query parameter, e.g. alertname="Foo"). AM v2 API
+// does not expose a fingerprint filter, so callers match client-side.
+func (c *client) fetchAlerts(ctx context.Context, filters ...string) ([]alert, error) {
 	u, err := url.Parse(c.cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse alertmanager url: %w", err)
@@ -183,9 +191,12 @@ func (c *client) fetchAlerts(ctx context.Context) ([]alert, error) {
 	q.Set("active", "true")
 	q.Set("silenced", "true")
 	q.Set("inhibited", "true")
+	for _, f := range filters {
+		q.Add("filter", f)
+	}
 	u.RawQuery = q.Encode()
 
-	status, body, err := c.doWithRetry(ctx, 1<<20, func() (*http.Request, error) {
+	status, body, err := c.doWithRetry(ctx, maxAlertsBody+1, func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("build request: %w", err)
@@ -199,6 +210,9 @@ func (c *client) fetchAlerts(ctx context.Context) ([]alert, error) {
 	if status < 200 || status >= 300 {
 		return nil, &APIError{StatusCode: status, Body: string(body)}
 	}
+	if len(body) > maxAlertsBody {
+		return nil, fmt.Errorf("alertmanager get alerts: response exceeds %d bytes", maxAlertsBody)
+	}
 
 	var alerts []alert
 	if err := json.Unmarshal(body, &alerts); err != nil {
@@ -207,11 +221,15 @@ func (c *client) fetchAlerts(ctx context.Context) ([]alert, error) {
 	return alerts, nil
 }
 
-func (c *client) GetAlertLabels(ctx context.Context, fingerprint string) (map[string]string, error) {
+func (c *client) GetAlertLabels(ctx context.Context, fingerprint, alertname string) (map[string]string, error) {
 	if fingerprint == "" {
 		return nil, errors.New("fingerprint is empty")
 	}
-	alerts, err := c.fetchAlerts(ctx)
+	var filters []string
+	if alertname != "" {
+		filters = append(filters, "alertname="+strconv.Quote(alertname))
+	}
+	alerts, err := c.fetchAlerts(ctx, filters...)
 	if err != nil {
 		return nil, err
 	}
