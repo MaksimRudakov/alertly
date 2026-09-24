@@ -122,6 +122,7 @@ cosign verify \
   ghcr.io/maksimrudakov/charts/alertly:0.7.4
 
 # .tgz from GitHub Release (download the .tgz and .tgz.bundle from the alertly-0.7.4 release)
+# Note: bundles of several earlier 0.7.x releases were made for a different tarball and do not verify (see CHANGELOG); use the OCI check above for those.
 cosign verify-blob \
   --bundle alertly-0.7.4.tgz.bundle \
   --new-bundle-format \
