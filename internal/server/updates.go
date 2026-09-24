@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"runtime/debug"
 	"time"
 
@@ -60,8 +61,18 @@ func (p *UpdatesPoller) Run(ctx context.Context) {
 			if errors.As(err, &ae) {
 				reason = "api_" + httpStatusClass(ae.Status())
 			}
+			// Telegram allows one getUpdates consumer per bot token; 409 means
+			// another process (a second replica, another alertly, a dev run
+			// with the prod token) is polling, and button presses are split
+			// between the two.
+			if ae != nil && ae.Status() == http.StatusConflict {
+				reason = "conflict"
+				p.Logger.Error("getUpdates conflict: another instance is polling this bot token; silence buttons and commands will misbehave until it stops",
+					"err", err, "backoff", backoff)
+			} else {
+				p.Logger.Warn("getUpdates failed", "err", err, "backoff", backoff)
+			}
 			metrics.UpdatesPollErrors.WithLabelValues(reason).Inc()
-			p.Logger.Warn("getUpdates failed", "err", err, "backoff", backoff)
 			select {
 			case <-ctx.Done():
 				return

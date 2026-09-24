@@ -26,7 +26,7 @@ func TestGetAlertLabels_Found(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
-	labels, err := c.GetAlertLabels(context.Background(), "fp1")
+	labels, err := c.GetAlertLabels(context.Background(), "fp1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestGetAlertLabels_NotFound(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
-	_, err := c.GetAlertLabels(context.Background(), "fp-missing")
+	_, err := c.GetAlertLabels(context.Background(), "fp-missing", "")
 	if !errors.Is(err, ErrAlertNotFound) {
 		t.Errorf("expected ErrAlertNotFound, got %v", err)
 	}
@@ -56,7 +56,7 @@ func TestGetAlertLabels_APIError(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
-	_, err := c.GetAlertLabels(context.Background(), "fp")
+	_, err := c.GetAlertLabels(context.Background(), "fp", "")
 	var ae *APIError
 	if !errors.As(err, &ae) || ae.StatusCode != 500 {
 		t.Errorf("expected APIError(500), got %v", err)
@@ -120,7 +120,7 @@ func TestAuth_Bearer(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{URL: srv.URL, Auth: Auth{Token: "tkn"}, RequestTimeout: time.Second})
-	_, _ = c.GetAlertLabels(context.Background(), "fp")
+	_, _ = c.GetAlertLabels(context.Background(), "fp", "")
 	if gotAuth != "Bearer tkn" {
 		t.Errorf("auth: %s", gotAuth)
 	}
@@ -135,7 +135,7 @@ func TestAuth_Basic(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{URL: srv.URL, Auth: Auth{Username: "u", Password: "p"}, RequestTimeout: time.Second})
-	_, _ = c.GetAlertLabels(context.Background(), "fp")
+	_, _ = c.GetAlertLabels(context.Background(), "fp", "")
 	if !strings.HasPrefix(gotAuth, "Basic ") {
 		t.Errorf("expected Basic auth, got %q", gotAuth)
 	}
@@ -218,7 +218,7 @@ func TestGetAlertLabels_RetriesTransient5xx(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
-	labels, err := c.GetAlertLabels(context.Background(), "fp")
+	labels, err := c.GetAlertLabels(context.Background(), "fp", "")
 	if err != nil {
 		t.Fatalf("expected retry to succeed, got %v", err)
 	}
@@ -294,5 +294,47 @@ func TestLabelCache_Len(t *testing.T) {
 	var nilCache *LabelCache
 	if nilCache.Len() != 0 {
 		t.Error("nil cache Len should be 0")
+	}
+}
+
+func TestGetAlertLabels_AlertnameFilter(t *testing.T) {
+	var gotFilters []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotFilters = r.URL.Query()["filter"]
+		_, _ = io.WriteString(w, `[{"fingerprint":"fp1","labels":{"alertname":"High \"CPU\""}}]`)
+	}))
+	defer srv.Close()
+
+	c := New(Config{URL: srv.URL, RequestTimeout: 2 * time.Second})
+	if _, err := c.GetAlertLabels(context.Background(), "fp1", `High "CPU"`); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotFilters) != 1 || gotFilters[0] != `alertname="High \"CPU\""` {
+		t.Errorf("filter = %q", gotFilters)
+	}
+
+	if _, err := c.GetAlertLabels(context.Background(), "fp1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotFilters) != 0 {
+		t.Errorf("no filter expected without alertname, got %q", gotFilters)
+	}
+}
+
+func TestGetAlertLabels_OversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "[")
+		_, _ = io.WriteString(w, strings.Repeat(" ", maxAlertsBody))
+		_, _ = io.WriteString(w, "]")
+	}))
+	defer srv.Close()
+
+	c := New(Config{URL: srv.URL, RequestTimeout: 5 * time.Second})
+	_, err := c.GetAlertLabels(context.Background(), "fp1", "")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected size error, got %v", err)
+	}
+	if errors.Is(err, ErrAlertNotFound) {
+		t.Error("oversized response must not look like not-found")
 	}
 }

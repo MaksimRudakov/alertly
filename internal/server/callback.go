@@ -108,11 +108,20 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 
 	// Window check: strict — if the message is not tracked or has expired,
 	// reject the click and strip the keyboard so it is clear nothing will happen.
-	if !h.deps.Tracker.Valid(chatID, cq.Message.MessageID) {
+	tracked, ok := h.deps.Tracker.Lookup(chatID, cq.Message.MessageID)
+	if !ok {
 		metrics.CallbacksReceived.WithLabelValues(action, "expired").Inc()
 		logger.Warn("callback: silence window expired or unknown message")
 		h.stripKeyboard(ctx, cq)
 		h.answer(ctx, cq.ID, "⏰ Silence window expired for this alert.", true)
+		return
+	}
+	// The button must carry the fingerprint alertly attached to this very
+	// message; anything else is a forged or stale payload.
+	if tracked != fingerprint {
+		metrics.CallbacksReceived.WithLabelValues(action, "invalid").Inc()
+		logger.Warn("callback: fingerprint does not match the tracked message", "tracked", tracked)
+		h.answer(ctx, cq.ID, "⚠️ Button does not match this alert.", true)
 		return
 	}
 
@@ -188,11 +197,18 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 // window is enforced by UndoTracker (strict: restart or expiry rejects).
 func (h *CallbackHandler) handleUndo(ctx context.Context, cq *telegram.CallbackQuery, silenceID string, logger *slog.Logger) {
 	chatID := cq.Message.Chat.ID
-	if h.deps.UndoTracker == nil || !h.deps.UndoTracker.Valid(chatID, cq.Message.MessageID) {
+	tracked, ok := h.deps.UndoTracker.Lookup(chatID, cq.Message.MessageID)
+	if !ok {
 		metrics.CallbacksReceived.WithLabelValues(CallbackActionUndo, "expired").Inc()
 		logger.Warn("callback: undo window expired or unknown message")
 		h.stripKeyboard(ctx, cq)
 		h.answer(ctx, cq.ID, "⏰ Undo window expired; remove the silence in Alertmanager if needed.", true)
+		return
+	}
+	if tracked != silenceID {
+		metrics.CallbacksReceived.WithLabelValues(CallbackActionUndo, "invalid").Inc()
+		logger.Warn("callback: silence id does not match the tracked message", "tracked", tracked)
+		h.answer(ctx, cq.ID, "⚠️ Button does not match this silence.", true)
 		return
 	}
 
@@ -222,19 +238,24 @@ func undoKeyboard(silenceID string) *telegram.InlineKeyboardMarkup {
 	}
 }
 
+// resolveLabels prefers the live alert from AM and falls back to the labels
+// cached when the notification was sent — on "not found" and on any other AM
+// failure alike, so an overloaded or briefly unreachable AM does not break the
+// button. The cached alertname narrows the AM query server-side.
 func (h *CallbackHandler) resolveLabels(ctx context.Context, fingerprint string) (map[string]string, error) {
-	labels, err := h.deps.AM.GetAlertLabels(ctx, fingerprint)
+	cached, cachedOK := h.deps.Cache.Get(fingerprint)
+	labels, err := h.deps.AM.GetAlertLabels(ctx, fingerprint, cached["alertname"])
 	if err == nil {
 		return labels, nil
 	}
-	if errors.Is(err, alertmanager.ErrAlertNotFound) {
-		if cached, ok := h.deps.Cache.Get(fingerprint); ok {
-			metrics.LabelCacheLookups.WithLabelValues("hit").Inc()
-			return cached, nil
+	if cachedOK {
+		metrics.LabelCacheLookups.WithLabelValues("hit").Inc()
+		if !errors.Is(err, alertmanager.ErrAlertNotFound) {
+			h.deps.Logger.Warn("callback: alertmanager lookup failed; using cached labels", "fingerprint", fingerprint, "err", err)
 		}
-		metrics.LabelCacheLookups.WithLabelValues("miss").Inc()
-		return nil, alertmanager.ErrAlertNotFound
+		return cached, nil
 	}
+	metrics.LabelCacheLookups.WithLabelValues("miss").Inc()
 	return nil, err
 }
 

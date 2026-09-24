@@ -261,3 +261,25 @@ func TestButtonTrackerSweepStopsAtFirstLive(t *testing.T) {
 		t.Fatal("fresh entry must survive the sweep")
 	}
 }
+
+func TestButtonTracker_Lookup(t *testing.T) {
+	now := time.Now()
+	tr := NewButtonTracker(time.Hour, 0)
+	tr.now = func() time.Time { return now }
+	tr.Register(-100, 42, "fp1")
+
+	if fp, ok := tr.Lookup(-100, 42); !ok || fp != "fp1" {
+		t.Fatalf("Lookup = %q, %v; want fp1, true", fp, ok)
+	}
+	if _, ok := tr.Lookup(-100, 43); ok {
+		t.Error("unknown message must not be found")
+	}
+	now = now.Add(time.Hour)
+	if _, ok := tr.Lookup(-100, 42); ok {
+		t.Error("expired entry must not be found")
+	}
+	var nilTracker *ButtonTracker
+	if _, ok := nilTracker.Lookup(-100, 42); ok {
+		t.Error("nil tracker must report not found")
+	}
+}
