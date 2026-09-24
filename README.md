@@ -213,7 +213,7 @@ Operational notes:
 - Callback processing is bounded (15s per press) and transient Alertmanager errors are retried; delivery of callbacks is at-least-once, so in a narrow crash window a silence can be created twice — duplicates are harmless (identical matchers).
 - Labels are resolved via the AM API (narrowed server-side by the cached `alertname`) with an in-process fallback cache, so resolving works even when AM has already dropped the alert, is briefly unreachable, or holds too many alerts to list.
 - A press is accepted only if its fingerprint (or, for Undo, silence ID) matches what alertly attached to that very message.
-- **One poller per bot token.** Telegram allows a single `getUpdates` consumer; a second replica or another process polling the same token gets `409 Conflict` and button presses are split between them. alertly logs `another instance is polling this bot token` and counts `alertly_updates_poll_errors_total{reason="conflict"}`; the Helm chart refuses to render `replicaCount > 1` with `config.updates.enabled`.
+- **One poller per bot token.** Telegram allows a single `getUpdates` consumer; a second replica or another process polling the same token gets `409 Conflict` and button presses are split between them. A few conflicts during a rolling update (old and new pod overlap for seconds) are expected and logged as warnings; a streak lasting over 2 minutes is logged as an error `another instance is polling this bot token`. Every conflict counts in `alertly_updates_poll_errors_total{reason="conflict"}` — alert on a sustained rate (e.g. `increase(...[10m]) > 10`), not on a single increment. The Helm chart refuses to render `replicaCount > 1` with `config.updates.enabled`.
 
 ## Chat-ops commands
 
@@ -383,7 +383,7 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | `alertly_telegram_retries_total{reason="deadline_skip"}` growing | server `WriteTimeout` shorter than worst-case retry budget | raise `server.write_timeout` or lower `telegram.retry.max_backoff`; check Telegram `Retry-After` headers in logs |
 | Silence buttons not shown on alerts | `updates.enabled: false`, chat not in `chat_allowlist`, or alert not `firing` | enable updates, add the chat ID to `updates.chat_allowlist`; buttons are only attached to firing Alertmanager alerts |
 | Button press answers «Silence window expired» | button older than `updates.button_ttl` or alertly restarted since the message was sent | expected (strict policy); re-fire the alert or silence via AM UI |
-| Buttons work intermittently, logs show `another instance is polling this bot token` | two processes poll the same bot token (`409 Conflict`) | keep exactly one alertly with `updates.enabled` per bot token; stop the other replica/process or give it its own bot |
+| Buttons work intermittently, logs show `getUpdates conflict persists: another instance is polling this bot token` | two processes poll the same bot token (`409 Conflict`) | keep exactly one alertly with `updates.enabled` per bot token; stop the other replica/process or give it its own bot |
 | Button press answers «Failed to query Alertmanager» | `alertmanager.url` wrong/unreachable or auth missing | check `alertmanager.url`, `ALERTMANAGER_AUTH_*` env, NetworkPolicy to AM; see `alertly_updates_poll_errors_total` and logs |
 
 ## Architecture
