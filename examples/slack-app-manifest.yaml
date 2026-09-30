@@ -1,0 +1,23 @@
+# Slack App manifest for alertly (api.slack.com/apps -> Create New App ->
+# From an app manifest). Install to the workspace, copy the Bot User OAuth
+# Token (xoxb-...) into SLACK_BOT_TOKEN and invite the bot to every channel
+# listed in destinations (/invite @alertly).
+#
+# Delivery needs only chat:write. Interactive buttons and /alertly status
+# (next alertly release) will add Socket Mode and the `commands` scope.
+display_information:
+  name: alertly
+  description: Alertmanager / Kubewatch alerts
+  background_color: "#1d1c1d"
+features:
+  bot_user:
+    display_name: alertly
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

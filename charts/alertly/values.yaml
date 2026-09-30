@@ -124,13 +124,21 @@ secret:
     alertmanagerUsername: ALERTMANAGER_AUTH_USERNAME
     alertmanagerPassword: ALERTMANAGER_AUTH_PASSWORD
     alertmanagerToken: ALERTMANAGER_AUTH_TOKEN
-  # -- Token values used only when `create: true`. Alertmanager fields are optional.
+    slackBotToken: SLACK_BOT_TOKEN
+  # -- Token values used only when `create: true`. `telegramBotToken` is required
+  # while `config.telegram.enabled`, `slackBotToken` while `config.slack.enabled`,
+  # `webhookAuthToken` unless `config.clusters` is set. Alertmanager fields are optional.
   values:
     telegramBotToken: ""
     webhookAuthToken: ""
     alertmanagerUsername: ""
     alertmanagerPassword: ""
     alertmanagerToken: ""
+    slackBotToken: ""
+    # -- Extra Secret keys (env var name -> value), e.g. per-cluster webhook
+    # tokens (`auth_token_env`) and per-cluster Alertmanager credentials
+    # (`<auth_env_prefix>_TOKEN`).
+    extra: {}
 
 # -- Env vars passed to the container. Keys become env names, values are quoted as strings.
 env:
@@ -203,6 +211,8 @@ config:
     idle_timeout: 120s
     read_header_timeout: 5s
   telegram:
+    # Set false for a Slack-only installation.
+    enabled: true
     api_url: "https://api.telegram.org"
     parse_mode: "HTML"
     request_timeout: 10s
@@ -240,6 +250,47 @@ config:
   logging:
     level: "info"
     format: "json"
+
+  # -- Slack sink (bot token from SLACK_BOT_TOKEN, scope chat:write; invite
+  # the bot to every channel it posts to). Targets are channel IDs (C…), never
+  # names.
+  slack:
+    enabled: false
+    api_url: "https://slack.com/api"
+    request_timeout: 10s
+    # Channel IDs webhook URLs may target. Empty = any channel.
+    channel_allowlist: []
+    rate_limit:
+      per_channel_per_sec: 1
+      global_per_sec: 20
+    retry:
+      max_attempts: 5
+      initial_backoff: 1s
+      max_backoff: 60s
+
+  # -- Rendering per sink. `builtin` is alertly's own layout (same structure
+  # in Telegram and Slack); `template` uses `templates.*` (Telegram) and
+  # `templates["slack.<source>"]` / `templates["slack.default"]` (Slack mrkdwn).
+  format:
+    telegram: template
+    slack: builtin
+    labels: [alertname, namespace]
+
+  # -- Named clusters, each with its own webhook token env, Alertmanager and
+  # destinations; served on /v1/clusters/<cluster>/<source>/<destination>.
+  # Empty = single-cluster mode (the legacy /v1/<source>/<chats> route).
+  # Example:
+  #   clusters:
+  #     k8s-prod:
+  #       alias: prod
+  #       auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_PROD
+  #       alertmanager:
+  #         url: http://alertmanager.monitoring.svc:9093
+  #       destinations:
+  #         default:
+  #           - telegram: "-1001234567890:42"
+  #           - slack: "C0123ABCDEF"
+  clusters: {}
 
   # -- Interactive callbacks (Telegram long polling) and Alertmanager silence integration.
   # Keep disabled unless on-call needs in-chat silence buttons.

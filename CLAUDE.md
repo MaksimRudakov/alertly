@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`alertly` — Go HTTP service that ingests webhooks from Alertmanager and Kubewatch and forwards them to Telegram chats. Stdlib-first (`net/http` with `mux.Handle("POST /v1/...{chats}")`), no web framework.
+`alertly` — Go HTTP service that ingests webhooks from Alertmanager, Kubewatch and a generic JSON source and forwards them to Telegram and/or Slack, optionally for several clusters with named destinations. Stdlib-first (`net/http` with `mux.Handle("POST /v1/...{chats}")`), no web framework.
 
 - Module: `github.com/MaksimRudakov/alertly`
-- Go: `1.25` (toolchain `go1.26.6`)
+- Go: `1.26` (toolchain `go1.26.6`; `x/time` 0.16 requires the 1.26 directive)
 - Single binary entry: `cmd/alertly`
 
 Treat README + `examples/config.yaml` + `TODO.md` as the source of truth for current scope. Dedup, interactive silence buttons (Phase 2b), the generic source and the `/status` chat-ops command are shipped; `TODO.md` lists the remaining Phase 2/3 items (label routing, async queue, Markdown, `/alerts` command) that are intentionally deferred until a real signal demands them.
@@ -43,13 +43,12 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 `cmd/alertly/main.go` wires everything and starts `internal/server`. Per webhook:
 
 1. `recoverMiddleware` → `requestIDMiddleware` (echoes a caller-supplied `X-Request-Id` only when it matches `[A-Za-z0-9._-]{1,64}`; anything else — control chars, spaces, non-ASCII — is replaced with a fresh UUID so callers cannot inject log noise through the echoed header) → `loggingMiddleware` (slog logger attached to ctx).
-2. `authMiddleware` validates `Authorization: Bearer <WEBHOOK_AUTH_TOKEN>` with `subtle.ConstantTimeCompare`, then `requestTimeoutMiddleware` puts an explicit deadline of `server.write_timeout - 1s` on the request context (webhook routes only). `http.Server.WriteTimeout` only arms a socket write deadline and never reaches `r.Context()`, so without this the deadline-aware retry below has nothing to check. When the budget runs out mid-payload the handler stops attempting further notifications, logs `request deadline reached`, and downgrades a would-be `200`/`204` to `207`.
+2. Two route families. Legacy `POST /v1/{source}/{chats}` (default cluster, registered only when `WEBHOOK_AUTH_TOKEN` is set) goes through `authMiddleware`; `POST /v1/clusters/{cluster}/{source}/{destination}` goes through `clusterAuthMiddleware`, which compares the bearer with that cluster's token (unknown cluster = same `401` as a wrong token). Both use `subtle.ConstantTimeCompare`, then `requestTimeoutMiddleware` puts an explicit deadline of `server.write_timeout - 1s` on the request context (webhook routes only). `http.Server.WriteTimeout` only arms a socket write deadline and never reaches `r.Context()`, so without this the deadline-aware retry below has nothing to check. When the budget runs out mid-payload the handler stops attempting further notifications, logs `request deadline reached`, and downgrades a would-be `200`/`204` to `207`.
 3. `webhookHandler` (handlers.go):
-   - parses `{chats}` path value via `parseChatTargets` — comma-separated `chat_id[:thread_id]` (e.g. `-1001234567890,-100456:42`). When `telegram.chat_allowlist` is non-empty, any target outside it fails the whole request with `403` before anything is sent (also bounds per-chat metric cardinality and rate-limiter state, both keyed by caller-supplied chat IDs).
-   - reads body through `http.MaxBytesReader(cfg.MaxBodyBytes)`.
-   - calls `source.Parse(body)` → `[]notification.Notification`.
-   - per notification: `renderer.Render(templateName, n)` → `telegram.SplitMessage(text, TelegramTextLimit=4096)` → `tg.SendMessage` per `(target, part)`.
-   - aggregates outcome: `200` all-ok, `204` nothing sent, `207` partial, `500` all-failed; emits `alertly_notifications_received_total{source,status_code}` and `alertly_notifications_sent_total{chat_id,status}`.
+   - a `targetResolver` yields `(cluster, []sink.Target)`: `legacyResolver` parses `{chats}` via `parseChatTargets` (bare `chat_id[:thread_id]` = Telegram, `tg:`/`slack:` prefixes) and enforces `telegram.chat_allowlist` / `slack.channel_allowlist` with `403` before anything is sent; `clusterResolver` looks up `clusters.<c>.destinations.<d>` (`404` if missing).
+   - reads body through `http.MaxBytesReader(cfg.MaxBodyBytes)`, `source.Parse(body)` → `[]notification.Notification`, sets `n.Cluster` (empty for the implicit default).
+   - `deliver` groups targets by sink and runs **one goroutine per sink**, each working through all notifications for its targets (`Sink.Render` once per notification, then `Sink.Send` per `(target, part)`), so a slow messenger never eats another's request budget.
+   - aggregates outcome: `200` all-ok, `204` nothing sent, `207` partial, `500` all-failed, body with per-sink stats; emits `alertly_notifications_received_total{source,status_code,cluster}` and `alertly_notifications_sent_total{chat_id,status,sink}`.
 
 ### Source plugins (`internal/source`)
 
@@ -60,6 +59,16 @@ Lint config (`.golangci.yaml`) is intentionally minimal: `gofmt`, `goimports`, `
 `kubewatch`: tries new (`eventmeta`) format then legacy flat; severity becomes `warning` for `Type=Warning` or `Reason=Failed`; fingerprint is sha256-16 of `kind|namespace|name|reason|type|message` — the message is included deliberately so dedup only absorbs identical redeliveries, not distinct events on the same object.
 
 `generic`: alertly's own JSON contract (single object or array, max 100 events; `title` required, `severity` default `info`, `status` default `event`). Fingerprint falls back to a content hash (title|body|status|sorted labels) so sender retries dedup correctly. Intended for GitLab CI / Jira / ArgoCD notifications / scripts — adaptation happens on the sender side, alertly does not parse third-party schemas.
+
+### Sinks (`internal/sink`, `internal/telegram`, `internal/slack`)
+
+`sink.Sink` = `Name`, `Render(templateName, n) → []Part`, `Send(ctx, Target, Part, *Actions) → MessageRef`, `Probe`, `Classify(err) → ErrClient|ErrServer|ErrRateLimited|ErrCanceled`. `Target{Sink, Chat, Thread}` and `MessageRef{Sink, Chat, ID}` are strings so Telegram (numeric IDs) and Slack (channel ID, `thread_ts`) share one model. `Actions` are messenger-neutral buttons (Telegram inline keyboard today). `server.New` builds a template-rendering Telegram sink from `Deps.Telegram`+`Renderer`+`Readiness` when `Deps.Sinks` is nil — that keeps the single-sink test harnesses unchanged.
+
+`format.telegram|slack`: `template` or `builtin` (`telegram.RenderBuiltin`, `slack.renderBuiltin` — same structure: title, `n.StatusLine()`, body, `format.labels` fields, links). Slack templates are `templates["slack.<source>"]` → `templates["slack.default"]` (never the Telegram `default`). Slack builtin = Block Kit inside an attachment (severity colour); sections ≤3000 runes, ≤45 blocks per message, overflow → continuation messages. `slack.client` mirrors `telegram.client`: retry 429/5xx/network + `ok:false` server codes, `Retry-After`, deadline skip, global + per-channel limiter; token only in the `Authorization` header.
+
+### Clusters
+
+`config.ResolvedClusters()` = configured `clusters` + an implicit `default` (top-level `alertmanager`, `WEBHOOK_AUTH_TOKEN`) unless defined. `main.buildClusters` turns them into `server.Cluster{Name, Alias, Implicit, Destinations, AM, WatchdogAlert}` and reads each named cluster's token from `auth_token_env` (values must be unique). Cluster is part of every state key: dedup `cluster|fp|sink:chat[:thread]|status`, `labelCacheKey` (`cluster|fp`, bare fp for default), `ButtonTracker` entries. Callback data: `s|fp|dur` for the default cluster (0.7 wire format, so old buttons keep working), `s|alias|fp|dur` for named clusters; the callback handler resolves the alias, checks cluster+fp against the tracker and silences in `cluster.AM`. Interactive features (buttons, `/status`) are Telegram-only; `/status` reports the default cluster's AM (or the first cluster with one).
 
 ### Notification → Telegram
 
@@ -88,9 +97,9 @@ Off by default; enabled via `updates.enabled` + `alertmanager.url`. Moving parts
 
 ### Readiness model
 
-`server/readyz.go` `ReadinessTracker`:
-- starts unready with reason `startup: telegram getMe pending`;
-- `telegramHealthLoop` in `main.go` probes `tg.GetMe` continuously: exponential backoff until the first success (flips ready), then every minute; 3 consecutive probe failures flip unready. Probe success only re-arms probe-driven unreadiness — it never overrides the send-failure window below;
+`server/readyz.go` `ReadinessTracker`, **one per sink**, aggregated by `SinkReadiness`: `/readyz` is ready while ANY sink is (one messenger down must not pull the pod from the Service), body lists `sinks.<name>`; `alertly_sink_ready{sink}` gauge. Per tracker:
+- starts unready (`startup: telegram getMe pending` / `startup: slack auth.test pending`);
+- `sinkHealthLoop` in `main.go` probes `Sink.Probe` continuously: exponential backoff until the first success (flips ready), then every minute; 3 consecutive probe failures flip unready. Probe success only re-arms probe-driven unreadiness — it never overrides the send-failure window below;
 - runtime: `RecordSendSuccess` resets a failure counter and re-arms ready; `RecordSendFailure(serverError=true)` increments and flips to unready after `readyzFailureWindow=10` consecutive failures. Server errors = Telegram 5xx **and** network-level errors; 4xx and 429 do NOT degrade readiness (caller/data problems and backpressure respectively).
 
 `/healthz` is unconditional 200; `/readyz` returns 503 with JSON reason when not ready.
@@ -103,11 +112,11 @@ Off by default; enabled via `updates.enabled` + `alertmanager.url`. Moving parts
 
 `config.Load(path)` starts from `config.Default()` and overlays YAML. The HTTP server sets explicit `idle_timeout` (120s — above `read_timeout`, which is net/http's fallback, so Alertmanager keep-alives stay warm) and `read_header_timeout` (5s), plus a 64 KiB `MaxHeaderBytes` constant. Defaults are intentionally production-sane; `examples/config.yaml` is what `make run` uses. `LOG_LEVEL` env overrides `logging.level` post-parse. `Validate()` enforces non-zero timeouts/limits and valid log level/format. Hot-reload is **not** supported — restart the process.
 
-Required env: `TELEGRAM_BOT_TOKEN`, `WEBHOOK_AUTH_TOKEN`. Optional: `ALERTLY_CONFIG` (default `/etc/alertly/config.yaml`), `LOG_LEVEL`, `DRY_RUN`.
+Required env: `TELEGRAM_BOT_TOKEN` (while `telegram.enabled`), `SLACK_BOT_TOKEN` (while `slack.enabled`), `WEBHOOK_AUTH_TOKEN` (unless `clusters` is set), each named cluster's `auth_token_env`. Optional: `ALERTLY_CONFIG` (default `/etc/alertly/config.yaml`), `LOG_LEVEL`, `DRY_RUN`.
 
 ### Metrics
 
-All in `internal/metrics`. Custom registry (no default Go process collectors except those explicitly registered: `NewGoCollector`, `NewProcessCollector`). `Init()` is idempotent via `sync.Once`. Names: `alertly_notifications_{received,sent}_total`, `alertly_telegram_{api_duration_seconds,retries_total,rate_limited_total}` (the `retries_total` reason `deadline_skip` marks aborted retries), `alertly_template_render_errors_total`, `alertly_message_split_total`, `alertly_auth_failures_total`, `alertly_source_parse_duration_seconds`, `alertly_dedup_skipped_total`, `alertly_callbacks_received_total`, `alertly_commands_received_total`, `alertly_silences_created_total`, `alertly_updates_poll_errors_total`, `alertly_label_cache_lookups_total`, `alertly_build_info`. Cache sizes are exposed as on-scrape gauges (`alertly_{dedup_cache,button_tracker,label_cache}_entries`) registered from `main.go` via `metrics.RegisterSizeGauge`.
+All in `internal/metrics`. Custom registry (no default Go process collectors except those explicitly registered: `NewGoCollector`, `NewProcessCollector`). `Init()` is idempotent via `sync.Once`. Names: `alertly_notifications_{received,sent}_total`, `alertly_telegram_{api_duration_seconds,retries_total,rate_limited_total}` (the `retries_total` reason `deadline_skip` marks aborted retries), `alertly_template_render_errors_total`, `alertly_message_split_total`, `alertly_auth_failures_total`, `alertly_source_parse_duration_seconds`, `alertly_dedup_skipped_total`, `alertly_callbacks_received_total`, `alertly_commands_received_total`, `alertly_silences_created_total`, `alertly_updates_poll_errors_total`, `alertly_label_cache_lookups_total`, `alertly_slack_{api_duration_seconds,retries_total,rate_limited_total}`, `alertly_sink_ready{sink}`, `alertly_build_info`. Cache sizes are exposed as on-scrape gauges (`alertly_{dedup_cache,button_tracker,label_cache}_entries`) registered from `main.go` via `metrics.RegisterSizeGauge`.
 
 ## Repo conventions
 

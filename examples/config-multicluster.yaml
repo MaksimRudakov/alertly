@@ -1,0 +1,70 @@
+# One alertly serving several clusters, with Telegram and Slack side by side.
+# Each cluster posts to /v1/clusters/<cluster>/<source>/<destination> with its
+# own bearer token (env var named in auth_token_env).
+#
+# Alertmanager in k8s-prod:
+#   receivers:
+#     - name: alertly
+#       webhook_configs:
+#         - url: http://alertly.monitoring.svc:8080/v1/clusters/k8s-prod/alertmanager/default
+#           http_config:
+#             authorization:
+#               credentials_file: /etc/alertmanager/secrets/alertly/token
+#           max_alerts: 100
+
+server:
+  listen_addr: ":8080"
+
+telegram:
+  enabled: true
+  chat_allowlist: [-1001111111111, -1002222222222]
+
+slack:
+  enabled: true                    # SLACK_BOT_TOKEN (xoxb-, scope chat:write)
+  channel_allowlist: [C0SDLCALRT1, C0DATAALRT1]
+
+format:
+  telegram: builtin                # same layout as Slack; `template` keeps templates.*
+  slack: builtin
+  labels: [alertname, namespace]
+
+clusters:
+  k8s-prod:
+    alias: prod                    # <= 8 chars, goes into silence button data
+    auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_PROD
+    alertmanager:
+      url: http://alertmanager-k8s-prod.internal:9093
+      auth_env_prefix: ALERTMANAGER_K8S_PROD   # _TOKEN or _USERNAME/_PASSWORD
+    destinations:
+      default:
+        - telegram: "-1001111111111:42"        # chat:topic
+
+  k8s-sdlc:
+    alias: sdlc
+    auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_SDLC
+    alertmanager:
+      url: http://alertmanager-k8s-sdlc.internal:9093
+    destinations:
+      default:
+        - telegram: "-1002222222222"
+        - slack: "C0SDLCALRT1"
+
+  k8s-data:
+    alias: data
+    auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_DATA
+    watchdog_alert: ""             # no deadman alert in this cluster
+    destinations:
+      default:
+        - telegram: "-1002222222222"
+        - slack: "C0DATAALRT1"
+      data-team:
+        - slack: "C0DATAALRT1"
+
+# Silence buttons (Telegram) work for clusters with an alertmanager.url.
+updates:
+  enabled: true
+  chat_allowlist: [-1001111111111, -1002222222222]
+
+dedup:
+  enabled: true
+  ttl: 1h
