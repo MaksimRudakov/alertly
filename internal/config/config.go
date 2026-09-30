@@ -106,6 +106,17 @@ type Updates struct {
 	// Commands enables read-only chat-ops commands (/status) over the same
 	// long-poll loop and allowlists as the silence buttons.
 	Commands Commands `yaml:"commands"`
+	// Slack enables buttons and `/alertly status` in Slack over Socket Mode
+	// (SLACK_APP_TOKEN, xapp-). The chat/user allowlists above are Telegram's.
+	Slack UpdatesSlack `yaml:"slack"`
+}
+
+type UpdatesSlack struct {
+	Enabled          bool     `yaml:"enabled"`
+	ChannelAllowlist []string `yaml:"channel_allowlist"`
+	UserAllowlist    []string `yaml:"user_allowlist"`
+	// Command is the slash command registered for the app.
+	Command string `yaml:"command"`
 }
 
 type Commands struct {
@@ -198,6 +209,7 @@ func Default() Config {
 					PipelineTimeout: 4 * time.Second,
 				},
 			},
+			Slack: UpdatesSlack{Command: "/alertly"},
 		},
 		Alertmanager: Alertmanager{
 			URL:            "",
@@ -323,8 +335,8 @@ func (c Config) Validate() error {
 		if !c.HasInteractiveAM() {
 			return errors.New("alertmanager.url (or clusters.<name>.alertmanager.url) is required when updates.enabled is true")
 		}
-		if !c.Telegram.Enabled {
-			return errors.New("updates.enabled requires telegram.enabled (silence buttons are Telegram-only for now)")
+		if !c.Telegram.Enabled && !c.Updates.Slack.Enabled {
+			return errors.New("updates.enabled needs an interactive messenger: telegram.enabled or updates.slack.enabled")
 		}
 		if c.Alertmanager.RequestTimeout <= 0 {
 			return errors.New("alertmanager.request_timeout must be > 0 when updates.enabled is true")
@@ -356,6 +368,9 @@ func (c Config) Validate() error {
 		return errors.New("dedup.ttl must be > 0 when dedup.enabled is true")
 	}
 	if err := c.validateSinks(); err != nil {
+		return err
+	}
+	if err := c.validateSlackUpdates(); err != nil {
 		return err
 	}
 	return c.validateClusters()

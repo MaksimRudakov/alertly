@@ -179,3 +179,18 @@ func TestKeyboard_SuppressedForSlackTarget(t *testing.T) {
 		t.Error("slack targets get no buttons until Slack interactivity ships")
 	}
 }
+
+func TestKeyboard_SlackChannelAllowlisted(t *testing.T) {
+	k := &AlertmanagerKeyboard{Durations: []string{"1h"}, SlackChannels: []string{"C0123ABCD"}, Cache: alertmanager.NewLabelCache(time.Hour, 10)}
+	prod := &Cluster{Name: "k8s-prod", Alias: "prod", AM: &fakeAM{}}
+	n := notification.Notification{Status: "firing", Fingerprint: "fp", Labels: map[string]string{"a": "1"}}
+	if a := k.Build(prod, sink.Target{Sink: sink.Slack, Chat: "C0123ABCD"}, n, "alertmanager"); a == nil || a.Rows[0][0].Data != "s|prod|fp|1h" {
+		t.Fatalf("slack buttons: %+v", a)
+	}
+	if a := k.Build(prod, sink.Target{Sink: sink.Slack, Chat: "C0OTHER01"}, n, "alertmanager"); a != nil {
+		t.Error("unlisted slack channel must not get buttons")
+	}
+	if a := k.Build(prod, tgTarget("-100"), n, "alertmanager"); a != nil {
+		t.Error("telegram chat outside ChatAllowlist must not get buttons")
+	}
+}

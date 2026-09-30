@@ -83,6 +83,10 @@ type Sink interface {
 	Render(templateName string, n notification.Notification) ([]Part, error)
 	// Send delivers one part; actions (nil = none) go on this part.
 	Send(ctx context.Context, t Target, p Part, actions *Actions) (MessageRef, error)
+	// SetActions replaces the buttons of a delivered message (nil removes
+	// them). original is the part as sent, for messengers that must resend
+	// the whole message body to change its buttons (Slack chat.update).
+	SetActions(ctx context.Context, ref MessageRef, original Part, actions *Actions) error
 	// Probe checks credentials and reachability (getMe / auth.test).
 	Probe(ctx context.Context) error
 	Classify(err error) ErrorClass

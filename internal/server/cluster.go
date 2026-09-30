@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/MaksimRudakov/alertly/internal/alertmanager"
@@ -38,5 +39,27 @@ func TargetsFromConfig(specs []config.TargetSpec) []sink.Target {
 		chat, thread, _ := strings.Cut(addr, ":")
 		out = append(out, sink.Target{Sink: name, Chat: chat, Thread: thread})
 	}
+	return out
+}
+
+// routesTo reports whether any destination of the cluster delivers to the
+// given chat/channel of a sink (threads ignored).
+func (c *Cluster) routesTo(sinkName, chat string) bool {
+	for _, targets := range c.Destinations {
+		for _, t := range targets {
+			if t.Sink == sinkName && t.Chat == chat {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sortedClusters(m map[string]*Cluster) []*Cluster {
+	out := make([]*Cluster, 0, len(m))
+	for _, c := range m {
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }

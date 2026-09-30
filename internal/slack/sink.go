@@ -58,21 +58,76 @@ func (s *Sink) Render(templateName string, n notification.Notification) ([]sink.
 	return out, nil
 }
 
-// Send posts one part. Actions are ignored until Slack interactivity ships.
-func (s *Sink) Send(ctx context.Context, t sink.Target, p sink.Part, _ *sink.Actions) (sink.MessageRef, error) {
-	msg := Message{Channel: t.Chat, ThreadTS: t.Thread, Text: p.Text}
-	if len(p.Payload) > 0 {
-		var pp partPayload
-		if err := json.Unmarshal(p.Payload, &pp); err != nil {
-			return sink.MessageRef{}, fmt.Errorf("slack payload: %w", err)
-		}
-		msg.Attachments = pp.Attachments
+// Send posts one part, with actions as a trailing Block Kit actions block.
+func (s *Sink) Send(ctx context.Context, t sink.Target, p sink.Part, actions *sink.Actions) (sink.MessageRef, error) {
+	msg, err := message(t.Chat, p, actions)
+	if err != nil {
+		return sink.MessageRef{}, err
 	}
+	msg.ThreadTS = t.Thread
 	ts, err := s.client.PostMessage(ctx, msg)
 	if err != nil {
 		return sink.MessageRef{}, err
 	}
 	return sink.MessageRef{Sink: sink.Slack, Chat: t.Chat, ID: ts}, nil
+}
+
+// SetActions rewrites the message with new buttons (chat.update needs the
+// whole body, hence original).
+func (s *Sink) SetActions(ctx context.Context, ref sink.MessageRef, original sink.Part, actions *sink.Actions) error {
+	msg, err := message(ref.Chat, original, actions)
+	if err != nil {
+		return err
+	}
+	return s.client.UpdateMessage(ctx, ref.ID, msg)
+}
+
+// Client exposes the transport for interactive features.
+func (s *Sink) Client() Client { return s.client }
+
+func message(channel string, p sink.Part, actions *sink.Actions) (Message, error) {
+	msg := Message{Channel: channel, Text: p.Text}
+	if len(p.Payload) > 0 {
+		var pp partPayload
+		if err := json.Unmarshal(p.Payload, &pp); err != nil {
+			return Message{}, fmt.Errorf("slack payload: %w", err)
+		}
+		msg.Attachments = pp.Attachments
+	}
+	if block := actionsBlock(actions); block != nil {
+		if len(msg.Attachments) == 0 {
+			msg.Attachments = []Attachment{{}}
+		}
+		last := &msg.Attachments[len(msg.Attachments)-1]
+		last.Blocks = append(append([]json.RawMessage(nil), last.Blocks...), block)
+	}
+	return msg, nil
+}
+
+// ActionsBlockID marks the block alertly owns in a message.
+const ActionsBlockID = "alertly_actions"
+
+// actionsBlock renders buttons; value carries the same callback data format
+// as Telegram, so one parser serves both messengers.
+func actionsBlock(a *sink.Actions) json.RawMessage {
+	if a == nil {
+		return nil
+	}
+	var elements []any
+	for _, row := range a.Rows {
+		for _, b := range row {
+			elements = append(elements, map[string]any{
+				"type":      "button",
+				"action_id": fmt.Sprintf("alertly_%d", len(elements)),
+				"text":      map[string]any{"type": "plain_text", "text": b.Text, "emoji": true},
+				"value":     b.Data,
+			})
+		}
+	}
+	if len(elements) == 0 {
+		return nil
+	}
+	return block(map[string]any{"type": "actions", "block_id": ActionsBlockID, "elements": elements})
 }
 
 func (s *Sink) Probe(ctx context.Context) error { return s.client.AuthTest(ctx) }
@@ -93,4 +148,27 @@ func (s *Sink) Classify(err error) sink.ErrorClass {
 		}
 	}
 	return sink.ErrServer
+}
+
+// OriginalPart rebuilds a sink.Part from a message as Slack reports it in an
+// interaction payload, minus alertly's actions block — what SetActions needs
+// when the tracker no longer holds the message as sent.
+func OriginalPart(text string, attachments []Attachment) sink.Part {
+	clean := make([]Attachment, 0, len(attachments))
+	for _, a := range attachments {
+		kept := a.Blocks[:0:0]
+		for _, b := range a.Blocks {
+			var meta struct {
+				BlockID string `json:"block_id"`
+			}
+			if json.Unmarshal(b, &meta) == nil && meta.BlockID == ActionsBlockID {
+				continue
+			}
+			kept = append(kept, b)
+		}
+		a.Blocks = kept
+		clean = append(clean, a)
+	}
+	payload, _ := json.Marshal(partPayload{Attachments: clean})
+	return sink.Part{Text: text, Payload: payload}
 }

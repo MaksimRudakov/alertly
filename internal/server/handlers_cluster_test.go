@@ -31,9 +31,10 @@ type recordingSink struct {
 	delay time.Duration
 	fail  error
 
-	mu     sync.Mutex
-	sent   []sinkSend
-	nextID int
+	mu      sync.Mutex
+	sent    []sinkSend
+	updates []sinkUpdate
+	nextID  int
 }
 
 type sinkSend struct {
@@ -66,6 +67,25 @@ func (s *recordingSink) Send(ctx context.Context, t sink.Target, p sink.Part, a 
 	}
 	s.nextID++
 	return sink.MessageRef{Sink: s.name, Chat: t.Chat, ID: strconv.Itoa(s.nextID)}, nil
+}
+
+func (s *recordingSink) SetActions(_ context.Context, ref sink.MessageRef, original sink.Part, a *sink.Actions) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updates = append(s.updates, sinkUpdate{Ref: ref, Original: original, Actions: a})
+	return nil
+}
+
+func (s *recordingSink) Updates() []sinkUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]sinkUpdate(nil), s.updates...)
+}
+
+type sinkUpdate struct {
+	Ref      sink.MessageRef
+	Original sink.Part
+	Actions  *sink.Actions
 }
 
 func (s *recordingSink) Probe(context.Context) error { return nil }

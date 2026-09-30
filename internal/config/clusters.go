@@ -212,6 +212,41 @@ func (c Config) validateSinks() error {
 	return nil
 }
 
+var (
+	slackUserRE    = regexp.MustCompile(`^[UW][A-Z0-9]{8,}$`)
+	slackCommandRE = regexp.MustCompile(`^/[a-z0-9_-]{1,31}$`)
+)
+
+func (c Config) validateSlackUpdates() error {
+	u := c.Updates.Slack
+	if !u.Enabled {
+		return nil
+	}
+	if !c.Updates.Enabled {
+		return errors.New("updates.slack.enabled requires updates.enabled")
+	}
+	if !c.Slack.Enabled {
+		return errors.New("updates.slack.enabled requires slack.enabled")
+	}
+	if len(u.ChannelAllowlist) == 0 {
+		return errors.New("updates.slack.channel_allowlist must list at least one channel ID when updates.slack.enabled is true")
+	}
+	for _, ch := range u.ChannelAllowlist {
+		if !slackChannelRE.MatchString(ch) {
+			return fmt.Errorf("updates.slack.channel_allowlist: %q is not a Slack channel ID", ch)
+		}
+	}
+	for _, id := range u.UserAllowlist {
+		if !slackUserRE.MatchString(id) {
+			return fmt.Errorf("updates.slack.user_allowlist: %q is not a Slack user ID (U…/W…)", id)
+		}
+	}
+	if !slackCommandRE.MatchString(u.Command) {
+		return fmt.Errorf("updates.slack.command %q must look like /alertly", u.Command)
+	}
+	return nil
+}
+
 func (c Config) validateClusters() error {
 	aliases := map[string]string{}
 	tokenEnvs := map[string]string{}
