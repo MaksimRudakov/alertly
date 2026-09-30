@@ -278,11 +278,20 @@ func TestMessageHandler_MultiClusterStatus(t *testing.T) {
 		t.Fatalf("chat -100 is routed from k8s-prod only:\n%s", got)
 	}
 
-	msg := statusMsg(-100, 1)
+	msg := statusMsg(-200, 1)
 	msg.Text = "/status data"
 	h.Handle(context.Background(), msg)
 	got = tg.sentMessages[len(tg.sentMessages)-1].Text
 	if !strings.Contains(got, "<b>Pipeline — k8s-data</b>") || !strings.Contains(got, "Alertmanager: ❌ unreachable") {
 		t.Errorf("explicit cluster by alias:\n%s", got)
+	}
+
+	// -100 receives only k8s-prod alerts: asking it about k8s-data is refused.
+	msg = statusMsg(-100, 1)
+	msg.Text = "/status k8s-data"
+	h.Handle(context.Background(), msg)
+	got = tg.sentMessages[len(tg.sentMessages)-1].Text
+	if !strings.Contains(got, "Unknown cluster") || strings.Contains(got, "Pipeline") {
+		t.Errorf("cluster not routed to this chat must look unknown:\n%s", got)
 	}
 }

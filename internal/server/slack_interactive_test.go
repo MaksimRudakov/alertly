@@ -63,10 +63,10 @@ func newSlackEnv(t *testing.T) *slackEnv {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	prod := &Cluster{Name: "k8s-prod", Alias: "prod", AM: e.prodAM, WatchdogAlert: "",
-		Destinations: map[string][]sink.Target{"default": {{Sink: sink.Slack, Chat: "C0PROD0001"}}}}
+		Destinations: map[string][]sink.Target{"default": {{Sink: sink.Slack, Chat: "C0PROD0001"}}, "shared": {{Sink: sink.Slack, Chat: "C0SHARED01"}}}}
 	data := &Cluster{Name: "k8s-data", Alias: "data", AM: &fakeAM{statusInfo: alertmanager.StatusInfo{Version: "0.28.1"}},
-		Destinations: map[string][]sink.Target{"default": {{Sink: sink.Slack, Chat: "C0DATA0001"}}}}
-	access := map[string]AccessPolicy{sink.Slack: {Chats: []string{"C0PROD0001", "C0DATA0001"}}}
+		Destinations: map[string][]sink.Target{"default": {{Sink: sink.Slack, Chat: "C0DATA0001"}}, "shared": {{Sink: sink.Slack, Chat: "C0SHARED01"}}}}
+	access := map[string]AccessPolicy{sink.Slack: {Chats: []string{"C0PROD0001", "C0DATA0001", "C0SHARED01"}}}
 	status := &StatusReporter{
 		StartedAt: time.Now(), Version: "v0.8.0", Commit: "abc",
 		Sinks:    NewSinkReadiness(map[string]ReadinessTracker{sink.Slack: readyTracker(), sink.Telegram: readyTracker()}),
@@ -189,14 +189,16 @@ func TestSlackInteractive_StatusCommand(t *testing.T) {
 		t.Errorf("per-sink readiness missing:\n%s", r.Text)
 	}
 
-	cmd("C0PROD0001", "status data")
+	cmd("C0SHARED01", "status data")
 	if r := e.client.replies[1]; !strings.Contains(r.Text, "k8s-data") || strings.Contains(r.Text, "k8s-prod") {
-		t.Errorf("named cluster (alias) selection:\n%s", r.Text)
+		t.Errorf("named cluster (alias) selection among the channel's clusters:\n%s", r.Text)
 	}
 
-	cmd("C0PROD0001", "status nope")
+	// k8s-data exists but does not route to C0PROD0001: indistinguishable
+	// from an unknown cluster.
+	cmd("C0PROD0001", "status data")
 	if r := e.client.replies[2]; r.ResponseType != "ephemeral" || !strings.Contains(r.Text, "Unknown cluster") {
-		t.Errorf("unknown cluster reply: %+v", r)
+		t.Errorf("cluster not routed to this channel must be refused like an unknown one: %+v", r)
 	}
 
 	cmd("C0PROD0001", "silence all")
