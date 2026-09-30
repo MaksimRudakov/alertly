@@ -3,7 +3,10 @@ package notification
 import "time"
 
 type Notification struct {
-	Source      string
+	Source string
+	// Cluster is the named cluster the webhook came in for; empty for the
+	// implicit default cluster (legacy single-cluster mode).
+	Cluster     string
 	Fingerprint string
 	Status      string
 	Severity    string
@@ -18,9 +21,4 @@ type Notification struct {
 type Link struct {
 	Title string
 	URL   string
-}
-
-type ChatTarget struct {
-	ChatID   int64
-	ThreadID *int
 }

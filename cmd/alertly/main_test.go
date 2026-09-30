@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/MaksimRudakov/alertly/internal/config"
 	"github.com/MaksimRudakov/alertly/internal/server"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 )
@@ -63,7 +65,7 @@ func TestTelegramHealthLoop_StartupAndRecovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		telegramHealthLoop(ctx, fake, readiness, logger, 20*time.Millisecond)
+		sinkHealthLoop(ctx, "telegram", fake.GetMe, readiness, logger, 20*time.Millisecond)
 		close(done)
 	}()
 
@@ -98,7 +100,7 @@ func TestTelegramHealthLoop_ClearsSendFailureUnreadiness(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go telegramHealthLoop(ctx, fake, readiness, logger, 20*time.Millisecond)
+	go sinkHealthLoop(ctx, "telegram", fake.GetMe, readiness, logger, 20*time.Millisecond)
 
 	waitFor(t, 2*time.Second, func() bool {
 		ready, _ := readiness.IsReady()
@@ -118,4 +120,49 @@ func TestTelegramHealthLoop_ClearsSendFailureUnreadiness(t *testing.T) {
 		ready, _ := readiness.IsReady()
 		return ready
 	}, "readiness stayed unready although getMe kept succeeding (send-failure deadlock)")
+}
+
+func TestBuildClusters(t *testing.T) {
+	cfg := config.Default()
+	cfg.Alertmanager.URL = "http://am-default:9093"
+	cfg.Clusters = map[string]config.Cluster{
+		"k8s-prod": {
+			Alias:        "prod",
+			AuthTokenEnv: "TEST_TOKEN_PROD",
+			Alertmanager: config.ClusterAlertmanager{URL: "http://am-prod:9093"},
+			Destinations: map[string][]config.TargetSpec{"default": {{Telegram: "-100:7"}}},
+		},
+		"edge": {AuthTokenEnv: "TEST_TOKEN_EDGE"},
+	}
+	t.Setenv("TEST_TOKEN_PROD", "p")
+	t.Setenv("TEST_TOKEN_EDGE", "e")
+
+	clusters, tokens, err := buildClusters(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clusters) != 3 || tokens["k8s-prod"] != "p" || tokens["edge"] != "e" {
+		t.Fatalf("clusters=%d tokens=%v", len(clusters), tokens)
+	}
+	if _, ok := tokens[config.DefaultCluster]; ok {
+		t.Error("implicit default cluster is served by WEBHOOK_AUTH_TOKEN, not a cluster token")
+	}
+	if clusters["k8s-prod"].AM == nil || clusters["edge"].AM != nil || clusters[config.DefaultCluster].AM == nil {
+		t.Error("AM clients: only clusters with a url get one")
+	}
+	if tg := clusters["k8s-prod"].Destinations["default"][0]; tg.Chat != "-100" || tg.Thread != "7" {
+		t.Errorf("target: %+v", tg)
+	}
+	if pc := pipelineCluster(clusters); pc == nil || pc.Name != config.DefaultCluster {
+		t.Errorf("pipeline cluster: %+v", pc)
+	}
+
+	t.Setenv("TEST_TOKEN_EDGE", "p")
+	if _, _, err := buildClusters(cfg); err == nil || !strings.Contains(err.Error(), "own token") {
+		t.Errorf("shared token value must be rejected, got %v", err)
+	}
+	t.Setenv("TEST_TOKEN_EDGE", "")
+	if _, _, err := buildClusters(cfg); err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Errorf("empty token env must be rejected, got %v", err)
+	}
 }

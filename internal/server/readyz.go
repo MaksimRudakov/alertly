@@ -1,6 +1,8 @@
 package server
 
 import (
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,7 +32,13 @@ type readiness struct {
 }
 
 func NewReadiness() ReadinessTracker {
-	r := &readiness{reason: "startup: telegram getMe pending"}
+	return NewReadinessWithReason("startup: telegram getMe pending")
+}
+
+// NewReadinessWithReason starts unready with the given startup reason (one
+// tracker per sink, each naming its own first probe).
+func NewReadinessWithReason(reason string) ReadinessTracker {
+	r := &readiness{reason: reason}
 	t := time.Time{}
 	r.lastCheck.Store(&t)
 	return r
@@ -94,4 +102,58 @@ func (r *readiness) LastCheck() time.Time {
 		return *t
 	}
 	return time.Time{}
+}
+
+// SinkReadiness aggregates the per-sink trackers behind /readyz. The pod is
+// ready while ANY sink is ready: one messenger's outage must not pull the pod
+// out of the Service and take delivery to the others down with it.
+type SinkReadiness struct {
+	names    []string
+	trackers map[string]ReadinessTracker
+}
+
+// SinkState is one sink's readiness as reported by /readyz.
+type SinkState struct {
+	Name      string
+	Ready     bool
+	Reason    string
+	LastCheck time.Time
+}
+
+func NewSinkReadiness(trackers map[string]ReadinessTracker) *SinkReadiness {
+	names := make([]string, 0, len(trackers))
+	for n := range trackers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return &SinkReadiness{names: names, trackers: trackers}
+}
+
+// Get returns the tracker of one sink (nil if the sink is not enabled).
+func (s *SinkReadiness) Get(name string) ReadinessTracker {
+	if s == nil {
+		return nil
+	}
+	return s.trackers[name]
+}
+
+func (s *SinkReadiness) States() []SinkState {
+	out := make([]SinkState, 0, len(s.names))
+	for _, n := range s.names {
+		ready, reason := s.trackers[n].IsReady()
+		out = append(out, SinkState{Name: n, Ready: ready, Reason: reason, LastCheck: s.trackers[n].LastCheck()})
+	}
+	return out
+}
+
+// IsReady reports ready if any sink is ready; otherwise the reasons of all.
+func (s *SinkReadiness) IsReady() (bool, string) {
+	var reasons []string
+	for _, st := range s.States() {
+		if st.Ready {
+			return true, ""
+		}
+		reasons = append(reasons, st.Name+": "+st.Reason)
+	}
+	return false, strings.Join(reasons, "; ")
 }

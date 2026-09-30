@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/MaksimRudakov/alertly/internal/alertmanager"
+	"github.com/MaksimRudakov/alertly/internal/config"
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 )
@@ -17,15 +18,30 @@ const (
 	CallbackActionSilence = "s"
 	CallbackActionUndo    = "u"
 	callbackFieldSep      = "|"
-	// callbackFieldNone fills the unused third field of undo callback data so
-	// every callback keeps the same 3-field wire format.
+	// callbackFieldNone fills the unused duration field of undo callback data
+	// so silence and undo share one wire format.
 	callbackFieldNone = "-"
 )
 
+// Callback data wire format: `action|value|duration` for the default cluster
+// (unchanged from single-cluster alertly, so buttons already in chats keep
+// working) and `action|alias|value|duration` for named clusters. value is the
+// alert fingerprint for silence, the silence ID for undo.
+type callbackPayload struct {
+	Action string
+	// Cluster is the cluster alias; "" = default cluster (3-field format).
+	Cluster  string
+	Value    string
+	Duration string
+}
+
 // CallbackDeps carries dependencies for handling Telegram callback_query events.
 type CallbackDeps struct {
-	Logger        *slog.Logger
-	Telegram      telegram.Client
+	Logger   *slog.Logger
+	Telegram telegram.Client
+	// Clusters by alias. nil = single-cluster mode: one default cluster whose
+	// Alertmanager is AM.
+	Clusters      map[string]*Cluster
 	AM            alertmanager.Client
 	Cache         *alertmanager.LabelCache
 	Tracker       *ButtonTracker
@@ -45,7 +61,20 @@ type CallbackHandler struct {
 }
 
 func NewCallbackHandler(deps CallbackDeps) *CallbackHandler {
+	if deps.Clusters == nil {
+		deps.Clusters = map[string]*Cluster{
+			config.DefaultCluster: {Name: config.DefaultCluster, Alias: config.DefaultCluster, Implicit: true, AM: deps.AM},
+		}
+	}
 	return &CallbackHandler{deps: deps}
+}
+
+// clusterByAlias resolves the alias carried in callback data ("" = default).
+func (h *CallbackHandler) clusterByAlias(alias string) *Cluster {
+	if alias == "" {
+		alias = config.DefaultCluster
+	}
+	return h.deps.Clusters[alias]
 }
 
 // Handle processes one callback_query. Errors from this method are logged
@@ -63,7 +92,8 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 		logger = logger.With("chat_id", cq.Message.Chat.ID, "message_id", cq.Message.MessageID)
 	}
 
-	action, fingerprint, durationKey, err := ParseCallbackData(cq.Data)
+	payload, err := ParseCallbackData(cq.Data)
+	action, fingerprint, durationKey := payload.Action, payload.Value, payload.Duration
 	if err != nil {
 		metrics.CallbacksReceived.WithLabelValues("unknown", "invalid").Inc()
 		logger.Warn("callback: invalid data", "data", cq.Data, "err", err)
@@ -100,15 +130,24 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 		return
 	}
 
+	cluster := h.clusterByAlias(payload.Cluster)
+	if cluster == nil || cluster.AM == nil {
+		metrics.CallbacksReceived.WithLabelValues(action, "invalid").Inc()
+		logger.Warn("callback: unknown cluster or cluster without alertmanager", "cluster_alias", payload.Cluster)
+		h.answer(ctx, cq.ID, "⚠️ Unknown cluster for this alert.", true)
+		return
+	}
+	logger = logger.With("cluster", cluster.Name)
+
 	if action == CallbackActionUndo {
-		// For undo the second field carries the silence ID, not a fingerprint.
-		h.handleUndo(ctx, cq, fingerprint, logger)
+		// For undo the value field carries the silence ID, not a fingerprint.
+		h.handleUndo(ctx, cq, cluster, fingerprint, logger)
 		return
 	}
 
 	// Window check: strict — if the message is not tracked or has expired,
 	// reject the click and strip the keyboard so it is clear nothing will happen.
-	tracked, ok := h.deps.Tracker.Lookup(chatID, cq.Message.MessageID)
+	trackedCluster, tracked, ok := h.deps.Tracker.LookupEntry(chatID, cq.Message.MessageID)
 	if !ok {
 		metrics.CallbacksReceived.WithLabelValues(action, "expired").Inc()
 		logger.Warn("callback: silence window expired or unknown message")
@@ -116,11 +155,11 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 		h.answer(ctx, cq.ID, "⏰ Silence window expired for this alert.", true)
 		return
 	}
-	// The button must carry the fingerprint alertly attached to this very
-	// message; anything else is a forged or stale payload.
-	if tracked != fingerprint {
+	// The button must carry the cluster and fingerprint alertly attached to
+	// this very message; anything else is a forged or stale payload.
+	if tracked != fingerprint || trackedCluster != cluster.Name {
 		metrics.CallbacksReceived.WithLabelValues(action, "invalid").Inc()
-		logger.Warn("callback: fingerprint does not match the tracked message", "tracked", tracked)
+		logger.Warn("callback: button does not match the tracked message", "tracked", tracked, "tracked_cluster", trackedCluster)
 		h.answer(ctx, cq.ID, "⚠️ Button does not match this alert.", true)
 		return
 	}
@@ -133,7 +172,7 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 		return
 	}
 
-	labels, err := h.resolveLabels(ctx, fingerprint)
+	labels, err := h.resolveLabels(ctx, cluster, fingerprint)
 	if err != nil {
 		if errors.Is(err, alertmanager.ErrAlertNotFound) {
 			metrics.CallbacksReceived.WithLabelValues(action, "not_found").Inc()
@@ -159,12 +198,16 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 	}
 
 	now := time.Now().UTC()
-	silenceID, err := h.deps.AM.CreateSilence(ctx, alertmanager.SilenceRequest{
+	comment := fmt.Sprintf("silenced via alertly by %s from chat %d", silenceCreatedBy(cq.From), chatID)
+	if !cluster.Implicit {
+		comment += " (cluster " + cluster.Name + ")"
+	}
+	silenceID, err := cluster.AM.CreateSilence(ctx, alertmanager.SilenceRequest{
 		Matchers:  matchers,
 		StartsAt:  now,
 		EndsAt:    now.Add(duration),
 		CreatedBy: silenceCreatedBy(cq.From),
-		Comment:   fmt.Sprintf("silenced via alertly by %s from chat %d", silenceCreatedBy(cq.From), chatID),
+		Comment:   comment,
 	})
 	if err != nil {
 		metrics.CallbacksReceived.WithLabelValues(action, "am_error").Inc()
@@ -181,9 +224,9 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 	// Silence buttons must go away so nobody silences twice; when undo is
 	// enabled they are replaced with a short-lived ↩️ Undo button instead.
 	h.deps.Tracker.Consume(chatID, cq.Message.MessageID)
-	if h.deps.UndoTracker != nil && len(BuildCallbackData(CallbackActionUndo, silenceID, callbackFieldNone)) <= maxCallbackDataBytes {
-		h.deps.UndoTracker.Register(chatID, cq.Message.MessageID, silenceID)
-		if err := h.deps.Telegram.EditMessageReplyMarkup(ctx, chatID, cq.Message.MessageID, undoKeyboard(silenceID)); err != nil {
+	if h.deps.UndoTracker != nil && len(buildCallbackData(cluster, CallbackActionUndo, silenceID, callbackFieldNone)) <= maxCallbackDataBytes {
+		h.deps.UndoTracker.RegisterFor(chatID, cq.Message.MessageID, cluster.Name, silenceID)
+		if err := h.deps.Telegram.EditMessageReplyMarkup(ctx, chatID, cq.Message.MessageID, undoKeyboard(cluster, silenceID)); err != nil {
 			h.deps.Logger.Warn("callback: attach undo keyboard failed", "err", err)
 		}
 	} else {
@@ -195,9 +238,9 @@ func (h *CallbackHandler) Handle(ctx context.Context, cq *telegram.CallbackQuery
 
 // handleUndo deletes the silence referenced by the undo button. The undo
 // window is enforced by UndoTracker (strict: restart or expiry rejects).
-func (h *CallbackHandler) handleUndo(ctx context.Context, cq *telegram.CallbackQuery, silenceID string, logger *slog.Logger) {
+func (h *CallbackHandler) handleUndo(ctx context.Context, cq *telegram.CallbackQuery, cluster *Cluster, silenceID string, logger *slog.Logger) {
 	chatID := cq.Message.Chat.ID
-	tracked, ok := h.deps.UndoTracker.Lookup(chatID, cq.Message.MessageID)
+	trackedCluster, tracked, ok := h.deps.UndoTracker.LookupEntry(chatID, cq.Message.MessageID)
 	if !ok {
 		metrics.CallbacksReceived.WithLabelValues(CallbackActionUndo, "expired").Inc()
 		logger.Warn("callback: undo window expired or unknown message")
@@ -205,14 +248,14 @@ func (h *CallbackHandler) handleUndo(ctx context.Context, cq *telegram.CallbackQ
 		h.answer(ctx, cq.ID, "⏰ Undo window expired; remove the silence in Alertmanager if needed.", true)
 		return
 	}
-	if tracked != silenceID {
+	if tracked != silenceID || trackedCluster != cluster.Name {
 		metrics.CallbacksReceived.WithLabelValues(CallbackActionUndo, "invalid").Inc()
 		logger.Warn("callback: silence id does not match the tracked message", "tracked", tracked)
 		h.answer(ctx, cq.ID, "⚠️ Button does not match this silence.", true)
 		return
 	}
 
-	if err := h.deps.AM.DeleteSilence(ctx, silenceID); err != nil {
+	if err := cluster.AM.DeleteSilence(ctx, silenceID); err != nil {
 		metrics.CallbacksReceived.WithLabelValues(CallbackActionUndo, "am_error").Inc()
 		metrics.SilencesDeleted.WithLabelValues("error").Inc()
 		logger.Error("callback: delete silence failed", "silence_id", silenceID, "err", err)
@@ -229,11 +272,11 @@ func (h *CallbackHandler) handleUndo(ctx context.Context, cq *telegram.CallbackQ
 	h.answer(ctx, cq.ID, "🔊 Silence removed — alert will notify again.", false)
 }
 
-func undoKeyboard(silenceID string) *telegram.InlineKeyboardMarkup {
+func undoKeyboard(cluster *Cluster, silenceID string) *telegram.InlineKeyboardMarkup {
 	return &telegram.InlineKeyboardMarkup{
 		InlineKeyboard: [][]telegram.InlineKeyboardButton{{{
 			Text:         "↩️ Undo silence",
-			CallbackData: BuildCallbackData(CallbackActionUndo, silenceID, callbackFieldNone),
+			CallbackData: buildCallbackData(cluster, CallbackActionUndo, silenceID, callbackFieldNone),
 		}}},
 	}
 }
@@ -242,9 +285,9 @@ func undoKeyboard(silenceID string) *telegram.InlineKeyboardMarkup {
 // cached when the notification was sent — on "not found" and on any other AM
 // failure alike, so an overloaded or briefly unreachable AM does not break the
 // button. The cached alertname narrows the AM query server-side.
-func (h *CallbackHandler) resolveLabels(ctx context.Context, fingerprint string) (map[string]string, error) {
-	cached, cachedOK := h.deps.Cache.Get(fingerprint)
-	labels, err := h.deps.AM.GetAlertLabels(ctx, fingerprint, cached["alertname"])
+func (h *CallbackHandler) resolveLabels(ctx context.Context, cluster *Cluster, fingerprint string) (map[string]string, error) {
+	cached, cachedOK := h.deps.Cache.Get(labelCacheKey(cluster.Name, fingerprint))
+	labels, err := cluster.AM.GetAlertLabels(ctx, fingerprint, cached["alertname"])
 	if err == nil {
 		return labels, nil
 	}
@@ -279,22 +322,55 @@ func (h *CallbackHandler) answer(ctx context.Context, id, text string, showAlert
 	}
 }
 
-// ParseCallbackData parses "s|<fp>|<dur>" into its parts.
-func ParseCallbackData(data string) (action, fingerprint, durationKey string, err error) {
+// ParseCallbackData parses the 3-field (default cluster) or 4-field (named
+// cluster) callback data format.
+func ParseCallbackData(data string) (callbackPayload, error) {
 	parts := strings.Split(data, callbackFieldSep)
-	if len(parts) != 3 {
-		return "", "", "", fmt.Errorf("expected 3 fields, got %d", len(parts))
+	var p callbackPayload
+	switch len(parts) {
+	case 3:
+		p = callbackPayload{Action: parts[0], Value: parts[1], Duration: parts[2]}
+	case 4:
+		p = callbackPayload{Action: parts[0], Cluster: parts[1], Value: parts[2], Duration: parts[3]}
+		if p.Cluster == "" {
+			return callbackPayload{}, errors.New("empty cluster alias in callback data")
+		}
+	default:
+		return callbackPayload{}, fmt.Errorf("expected 3 or 4 fields, got %d", len(parts))
 	}
-	if parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return "", "", "", errors.New("empty field in callback data")
+	if p.Action == "" || p.Value == "" || p.Duration == "" {
+		return callbackPayload{}, errors.New("empty field in callback data")
 	}
-	return parts[0], parts[1], parts[2], nil
+	return p, nil
 }
 
-// BuildCallbackData assembles "s|<fp>|<dur>". Caller is responsible for keeping
-// the result <=64 bytes (Telegram limit).
-func BuildCallbackData(action, fingerprint, durationKey string) string {
-	return action + callbackFieldSep + fingerprint + callbackFieldSep + durationKey
+// BuildCallbackData assembles the default-cluster "action|value|duration".
+// Caller is responsible for keeping the result <=64 bytes (Telegram limit).
+func BuildCallbackData(action, value, durationKey string) string {
+	return action + callbackFieldSep + value + callbackFieldSep + durationKey
+}
+
+// buildCallbackData picks the wire format for the cluster: named clusters
+// carry their alias, the default cluster keeps the 3-field format.
+func buildCallbackData(cluster *Cluster, action, value, durationKey string) string {
+	if cluster == nil || cluster.Name == config.DefaultCluster {
+		return BuildCallbackData(action, value, durationKey)
+	}
+	return action + callbackFieldSep + cluster.Alias + callbackFieldSep + value + callbackFieldSep + durationKey
+}
+
+func buildSilenceData(cluster *Cluster, fingerprint, durationKey string) string {
+	return buildCallbackData(cluster, CallbackActionSilence, fingerprint, durationKey)
+}
+
+// labelCacheKey namespaces cached labels per cluster (Alertmanager
+// fingerprints are label hashes and collide across clusters). The default
+// cluster keeps the bare fingerprint.
+func labelCacheKey(cluster, fingerprint string) string {
+	if cluster == config.DefaultCluster || cluster == "" {
+		return fingerprint
+	}
+	return cluster + "|" + fingerprint
 }
 
 func int64InSet(v int64, set []int64) bool {

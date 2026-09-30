@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/MaksimRudakov/alertly/internal/dedup"
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/server"
+	"github.com/MaksimRudakov/alertly/internal/sink"
 	"github.com/MaksimRudakov/alertly/internal/source"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 	tmpl "github.com/MaksimRudakov/alertly/internal/template"
@@ -44,36 +46,64 @@ func run() error {
 		"go", version.GoVersion(),
 	)
 
-	botToken := requireEnv("TELEGRAM_BOT_TOKEN")
-	if botToken == "" {
-		return errors.New("TELEGRAM_BOT_TOKEN is required")
-	}
-	authToken := requireEnv("WEBHOOK_AUTH_TOKEN")
-	if authToken == "" {
-		return errors.New("WEBHOOK_AUTH_TOKEN is required")
-	}
-
 	registry := metrics.Init()
 	metrics.BuildInfo.WithLabelValues(version.Version, version.Commit, version.GoVersion()).Set(1)
 
 	dryRun := config.DryRun()
 
-	limiter := telegram.NewLimiter(cfg.Telegram.RateLimit.GlobalPerSec, cfg.Telegram.RateLimit.PerChatPerSec)
-	tgClient := telegram.New(telegram.Config{
-		APIURL:         cfg.Telegram.APIURL,
-		Token:          botToken,
-		ParseMode:      cfg.Telegram.ParseMode,
-		RequestTimeout: cfg.Telegram.RequestTimeout,
-		MaxAttempts:    cfg.Telegram.Retry.MaxAttempts,
-		InitialBackoff: cfg.Telegram.Retry.InitialBackoff,
-		MaxBackoff:     cfg.Telegram.Retry.MaxBackoff,
-		DryRun:         dryRun,
-		PollMessages:   cfg.Updates.Enabled && cfg.Updates.Commands.Enabled,
-	}, limiter, logger)
-
 	renderer, err := tmpl.New(cfg.Templates)
 	if err != nil {
 		return fmt.Errorf("templates: %w", err)
+	}
+
+	sinks := map[string]sink.Sink{}
+	trackers := map[string]server.ReadinessTracker{}
+	var tgClient telegram.Client
+	if cfg.Telegram.Enabled {
+		botToken := requireEnv("TELEGRAM_BOT_TOKEN")
+		if botToken == "" {
+			return errors.New("TELEGRAM_BOT_TOKEN is required when telegram.enabled is true")
+		}
+		limiter := telegram.NewLimiter(cfg.Telegram.RateLimit.GlobalPerSec, cfg.Telegram.RateLimit.PerChatPerSec)
+		tgClient = telegram.New(telegram.Config{
+			APIURL:         cfg.Telegram.APIURL,
+			Token:          botToken,
+			ParseMode:      cfg.Telegram.ParseMode,
+			RequestTimeout: cfg.Telegram.RequestTimeout,
+			MaxAttempts:    cfg.Telegram.Retry.MaxAttempts,
+			InitialBackoff: cfg.Telegram.Retry.InitialBackoff,
+			MaxBackoff:     cfg.Telegram.Retry.MaxBackoff,
+			DryRun:         dryRun,
+			PollMessages:   cfg.Updates.Enabled && cfg.Updates.Commands.Enabled,
+		}, limiter, logger)
+		sinks[sink.Telegram] = telegram.NewSink(tgClient, renderer, cfg.Format.Telegram == config.FormatBuiltin, cfg.Format.Labels)
+		trackers[sink.Telegram] = server.NewReadiness()
+	}
+	if cfg.Slack.Enabled {
+		s, err := newSlackSink(cfg, renderer, dryRun, logger)
+		if err != nil {
+			return fmt.Errorf("slack: %w", err)
+		}
+		sinks[sink.Slack] = s
+		trackers[sink.Slack] = server.NewReadinessWithReason("startup: slack auth.test pending")
+	}
+	readiness := server.NewSinkReadiness(trackers)
+	for name, tr := range trackers {
+		metrics.RegisterSinkReadyGauge(name, func() bool { ok, _ := tr.IsReady(); return ok })
+	}
+
+	clusters, clusterTokens, err := buildClusters(cfg)
+	if err != nil {
+		return err
+	}
+	authToken := requireEnv(config.DefaultAuthTokenEnv)
+	if authToken == "" && len(clusterTokens) == 0 {
+		return errors.New("WEBHOOK_AUTH_TOKEN is required (or define clusters with auth_token_env)")
+	}
+	for name, tok := range clusterTokens {
+		if tok == authToken {
+			return fmt.Errorf("clusters.%s: its token equals WEBHOOK_AUTH_TOKEN; every cluster needs its own token", name)
+		}
 	}
 
 	sources := map[string]source.Source{
@@ -81,8 +111,6 @@ func run() error {
 		"kubewatch":    source.NewKubewatch(),
 		"generic":      source.NewGeneric(),
 	}
-
-	readiness := server.NewReadiness()
 
 	var dedupCache *dedup.Cache
 	if cfg.Dedup.Enabled {
@@ -95,7 +123,7 @@ func run() error {
 		StartedAt: time.Now(),
 		Version:   version.Version,
 		Commit:    version.Commit,
-		Readiness: readiness,
+		Readiness: trackers[sink.Telegram],
 		Activity:  activity,
 	}
 	if dedupCache != nil {
@@ -112,7 +140,7 @@ func run() error {
 			logger.Warn("updates.enabled=true ignored under DRY_RUN")
 		} else {
 			var err error
-			keyboard, trackerReg, bgWorkers, err = setupUpdates(cfg, tgClient, logger, status)
+			keyboard, trackerReg, bgWorkers, err = setupUpdates(cfg, tgClient, logger, status, clusters)
 			if err != nil {
 				return fmt.Errorf("updates: %w", err)
 			}
@@ -120,18 +148,21 @@ func run() error {
 	}
 
 	srv := server.New(cfg.Server, server.Deps{
-		Logger:        logger,
-		Sources:       sources,
-		Renderer:      renderer,
-		Telegram:      tgClient,
-		Readiness:     readiness,
-		AuthToken:     authToken,
-		Registry:      registry,
-		ChatAllowlist: cfg.Telegram.ChatAllowlist,
-		Keyboard:      keyboard,
-		Tracker:       trackerReg,
-		Dedup:         dedupCache,
-		Activity:      activity,
+		Logger:                logger,
+		Sources:               sources,
+		Renderer:              renderer,
+		Sinks:                 sinks,
+		SinkReadiness:         readiness,
+		AuthToken:             authToken,
+		Clusters:              clusters,
+		ClusterTokens:         clusterTokens,
+		Registry:              registry,
+		ChatAllowlist:         cfg.Telegram.ChatAllowlist,
+		SlackChannelAllowlist: cfg.Slack.ChannelAllowlist,
+		Keyboard:              keyboard,
+		Tracker:               trackerReg,
+		Dedup:                 dedupCache,
+		Activity:              activity,
 	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -147,10 +178,16 @@ func run() error {
 	}
 
 	if dryRun {
-		readiness.MarkReady()
-		logger.Warn("DRY_RUN active: telegram calls are skipped")
+		for _, tr := range trackers {
+			tr.MarkReady()
+		}
+		logger.Warn("DRY_RUN active: messenger calls are skipped")
 	} else {
-		startWorker(func(ctx context.Context) { telegramHealthLoop(ctx, tgClient, readiness, logger, time.Minute) })
+		for name, s := range sinks {
+			startWorker(func(ctx context.Context) {
+				sinkHealthLoop(ctx, name, s.Probe, trackers[name], logger, time.Minute)
+			})
+		}
 	}
 
 	for _, w := range bgWorkers {
@@ -182,18 +219,76 @@ func run() error {
 	return err
 }
 
-func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logger, status *server.StatusReporter) (server.KeyboardBuilder, server.ButtonRegistrar, []func(context.Context), error) {
-	amCfg := alertmanager.Config{
-		URL:            cfg.Alertmanager.URL,
-		RequestTimeout: cfg.Alertmanager.RequestTimeout,
-		Auth: alertmanager.Auth{
-			Username: os.Getenv("ALERTMANAGER_AUTH_USERNAME"),
-			Password: os.Getenv("ALERTMANAGER_AUTH_PASSWORD"),
-			Token:    os.Getenv("ALERTMANAGER_AUTH_TOKEN"),
-		},
+// buildClusters turns the resolved config clusters into runtime clusters
+// (targets, per-cluster Alertmanager clients) and reads each named cluster's
+// webhook token from its env var.
+func buildClusters(cfg config.Config) (map[string]*server.Cluster, map[string]string, error) {
+	clusters := map[string]*server.Cluster{}
+	tokens := map[string]string{}
+	seen := map[string]string{}
+	for _, rc := range cfg.ResolvedClusters() {
+		c := &server.Cluster{
+			Name:          rc.Name,
+			Alias:         rc.Alias,
+			Implicit:      rc.Implicit,
+			WatchdogAlert: rc.WatchdogAlert,
+			Destinations:  map[string][]sink.Target{},
+		}
+		for dest, specs := range rc.Destinations {
+			c.Destinations[dest] = server.TargetsFromConfig(specs)
+		}
+		if rc.Alertmanager.URL != "" {
+			prefix := rc.Alertmanager.AuthEnvPrefix
+			if prefix == "" {
+				prefix = config.DefaultAMAuthEnvPrefix
+			}
+			c.AM = alertmanager.New(alertmanager.Config{
+				URL:            rc.Alertmanager.URL,
+				RequestTimeout: rc.Alertmanager.RequestTimeout,
+				Auth: alertmanager.Auth{
+					Username: os.Getenv(prefix + "_USERNAME"),
+					Password: os.Getenv(prefix + "_PASSWORD"),
+					Token:    os.Getenv(prefix + "_TOKEN"),
+				},
+			})
+		}
+		if !rc.Implicit {
+			tok := requireEnv(rc.AuthTokenEnv)
+			if tok == "" {
+				return nil, nil, fmt.Errorf("clusters.%s: env %s (auth_token_env) is empty", rc.Name, rc.AuthTokenEnv)
+			}
+			if other, dup := seen[tok]; dup {
+				return nil, nil, fmt.Errorf("clusters.%s: token equals the one of cluster %q; every cluster needs its own token", rc.Name, other)
+			}
+			seen[tok] = rc.Name
+			tokens[rc.Name] = tok
+		}
+		clusters[rc.Name] = c
 	}
-	amClient := alertmanager.New(amCfg)
+	return clusters, tokens, nil
+}
 
+// pipelineCluster picks the cluster whose Alertmanager /status reports on:
+// the default cluster when it has one, else the first cluster (by name) that
+// does. Multi-cluster /status is a later stage.
+func pipelineCluster(clusters map[string]*server.Cluster) *server.Cluster {
+	if c := clusters[config.DefaultCluster]; c != nil && c.AM != nil {
+		return c
+	}
+	names := make([]string, 0, len(clusters))
+	for n := range clusters {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if clusters[n].AM != nil {
+			return clusters[n]
+		}
+	}
+	return nil
+}
+
+func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logger, status *server.StatusReporter, clusters map[string]*server.Cluster) (server.KeyboardBuilder, server.ButtonRegistrar, []func(context.Context), error) {
 	cache := alertmanager.NewLabelCache(cfg.Updates.LabelCacheTTL, cfg.Updates.LabelCacheMax)
 	tracker := server.NewButtonTracker(cfg.Updates.ButtonTTL, cfg.Updates.ButtonTrackerMax)
 	metrics.RegisterSizeGauge("alertly_label_cache_entries",
@@ -217,10 +312,15 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 			"Current number of messages with an active Undo button.", undoTracker.Len)
 	}
 
+	byAlias := make(map[string]*server.Cluster, len(clusters))
+	for _, c := range clusters {
+		byAlias[c.Alias] = c
+	}
+
 	handler := server.NewCallbackHandler(server.CallbackDeps{
 		Logger:          logger,
 		Telegram:        tgClient,
-		AM:              amClient,
+		Clusters:        byAlias,
 		Cache:           cache,
 		Tracker:         tracker,
 		ChatAllowlist:   cfg.Updates.ChatAllowlist,
@@ -247,11 +347,13 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 
 	var msgHandler *server.MessageHandler
 	if cfg.Updates.Commands.Enabled {
-		status.AM = amClient
-		status.Pipeline = server.PipelineConfig{
-			Enabled:       cfg.Updates.Commands.Status.Pipeline,
-			WatchdogAlert: cfg.Updates.Commands.Status.WatchdogAlert,
-			Timeout:       cfg.Updates.Commands.Status.PipelineTimeout,
+		if pc := pipelineCluster(clusters); pc != nil {
+			status.AM = pc.AM
+			status.Pipeline = server.PipelineConfig{
+				Enabled:       cfg.Updates.Commands.Status.Pipeline,
+				WatchdogAlert: pc.WatchdogAlert,
+				Timeout:       cfg.Updates.Commands.Status.PipelineTimeout,
+			}
 		}
 		msgHandler = server.NewMessageHandler(server.CommandDeps{
 			Logger:        logger,
@@ -288,6 +390,12 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		workers = append(workers, undoSweeper.Run)
 	}
 
+	withAM := 0
+	for _, c := range clusters {
+		if c.AM != nil {
+			withAM++
+		}
+	}
 	logger.Info("telegram updates enabled",
 		"chat_allowlist", len(cfg.Updates.ChatAllowlist),
 		"user_allowlist", len(cfg.Updates.UserAllowlist),
@@ -296,7 +404,7 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		"silence_matchers", cfg.Updates.SilenceMatchers,
 		"undo_window", cfg.Updates.UndoWindow,
 		"commands_enabled", cfg.Updates.Commands.Enabled,
-		"alertmanager_url", cfg.Alertmanager.URL,
+		"clusters_with_alertmanager", withAM,
 	)
 	return keyboard, tracker, workers, nil
 }
@@ -325,26 +433,25 @@ func requireEnv(name string) string {
 	return strings.TrimSpace(os.Getenv(name))
 }
 
-// telegramHealthLoop drives readiness from Telegram getMe. During startup any
-// failure keeps the pod unready (original startupCheck behaviour). Once ready,
-// it keeps probing every probeInterval so an outage is detected even when no
-// webhooks are flowing; a few consecutive failures are tolerated to avoid
-// flapping on transient errors. It never overrides a send-failure-driven
-// unready state with MarkReady: recovery from that path comes via
-// RecordSendSuccess, probe success only re-arms probe-driven unreadiness.
-func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.ReadinessTracker, logger *slog.Logger, probeInterval time.Duration) {
+// sinkHealthLoop drives one sink's readiness from its probe (Telegram getMe,
+// Slack auth.test). During startup any failure keeps the sink unready. Once
+// ready, it keeps probing every probeInterval so an outage is detected even
+// when no webhooks are flowing; a few consecutive failures are tolerated to
+// avoid flapping on transient errors.
+func sinkHealthLoop(ctx context.Context, name string, probe func(context.Context) error, r server.ReadinessTracker, logger *slog.Logger, probeInterval time.Duration) {
 	const (
 		probeTimeout     = 10 * time.Second
 		maxBackoff       = 30 * time.Second
 		failureThreshold = 3
 	)
+	logger = logger.With("sink", name)
 	backoff := time.Second
 	consecFails := 0
 	everReady := false
 
 	for {
 		callCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-		err := c.GetMe(callCtx)
+		err := probe(callCtx)
 		cancel()
 		if ctx.Err() != nil {
 			return
@@ -361,7 +468,7 @@ func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.Readine
 			// The probe exercises the very API the failed sends went to, so its
 			// success is sufficient evidence the path is usable again.
 			if ready, _ := r.IsReady(); !ready {
-				logger.Info("telegram getMe ok; readiness=ready")
+				logger.Info("sink probe ok; readiness=ready")
 				r.MarkReady()
 			}
 			everReady = true
@@ -370,13 +477,13 @@ func telegramHealthLoop(ctx context.Context, c telegram.Client, r server.Readine
 			wait = probeInterval
 		} else {
 			consecFails++
-			logger.Warn("telegram getMe failed",
+			logger.Warn("sink probe failed",
 				"err", err,
 				"consecutive", consecFails,
 				"next_retry_ms", backoff.Milliseconds(),
 			)
 			if !everReady || consecFails >= failureThreshold {
-				r.MarkUnready("telegram getMe failed: " + err.Error())
+				r.MarkUnready(name + " probe failed: " + err.Error())
 			}
 			wait = backoff
 			if backoff < maxBackoff {
