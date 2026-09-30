@@ -27,9 +27,10 @@ type Config struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	DryRun         bool
-	// ResponseURLHost additionally allows response_url on this host (tests
-	// and e2e against a fake Slack); production leaves it empty.
-	ResponseURLHost string
+	// ResponseURLHosts additionally trusts slash-command response_url on
+	// these hosts (GovSlack's hooks.slack-gov.com, a test double). Default:
+	// only https://*.slack.com.
+	ResponseURLHosts []string
 }
 
 // Client is the subset of the Slack Web API alertly uses.
@@ -178,7 +179,7 @@ func (c *client) UpdateMessage(ctx context.Context, ts string, msg Message) erro
 	if err != nil {
 		return fmt.Errorf("marshal chat.update: %w", err)
 	}
-	_, err = c.callWithRetry(ctx, "chat.update", body, c.channelWait(msg.Channel))
+	_, err = c.callWithRetry(ctx, "chat.update", body, c.globalWait())
 	return err
 }
 
@@ -190,7 +191,7 @@ func (c *client) PostEphemeral(ctx context.Context, channel, user, threadTS, tex
 	if err != nil {
 		return fmt.Errorf("marshal chat.postEphemeral: %w", err)
 	}
-	_, err = c.callWithRetry(ctx, "chat.postEphemeral", body, c.channelWait(channel))
+	_, err = c.callWithRetry(ctx, "chat.postEphemeral", body, c.globalWait())
 	return err
 }
 
@@ -229,19 +230,21 @@ func (c *client) Respond(ctx context.Context, responseURL string, reply CommandR
 }
 
 func (c *client) responseURLAllowed(u *url.URL) bool {
-	if c.cfg.ResponseURLHost != "" && u.Host == c.cfg.ResponseURLHost {
-		return true
+	for _, h := range c.cfg.ResponseURLHosts {
+		if u.Host == h {
+			return true
+		}
 	}
 	host := u.Hostname()
 	return u.Scheme == "https" && (host == "slack.com" || strings.HasSuffix(host, ".slack.com"))
 }
 
-func (c *client) channelWait(channel string) func(context.Context) error {
+func (c *client) globalWait() func(context.Context) error {
 	if c.limiter == nil {
 		return nil
 	}
 	return func(ctx context.Context) error {
-		if _, err := c.limiter.Wait(ctx, channel); err != nil {
+		if err := c.limiter.WaitGlobal(ctx); err != nil {
 			return fmt.Errorf("rate limiter wait: %w", err)
 		}
 		return nil

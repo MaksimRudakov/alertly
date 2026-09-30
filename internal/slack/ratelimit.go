@@ -33,6 +33,13 @@ func NewLimiter(globalPerSec, perChannelPerSec float64) *Limiter {
 	}
 }
 
+// WaitGlobal consumes only the workspace-wide quota: Slack's one message per
+// second per channel applies to chat.postMessage, not to chat.update or
+// chat.postEphemeral (per-method tiers).
+func (l *Limiter) WaitGlobal(ctx context.Context) error {
+	return l.global.Wait(ctx)
+}
+
 func (l *Limiter) Wait(ctx context.Context, channel string) (time.Duration, error) {
 	start := time.Now()
 	if err := l.global.Wait(ctx); err != nil {

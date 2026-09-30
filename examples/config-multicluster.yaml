@@ -60,10 +60,17 @@ clusters:
       data-team:
         - slack: "C0DATAALRT1"
 
-# Silence buttons (Telegram) work for clusters with an alertmanager.url.
+# Silence buttons and status commands work for clusters with an
+# alertmanager.url, in Telegram (long polling) and Slack (Socket Mode).
 updates:
   enabled: true
-  chat_allowlist: [-1001111111111, -1002222222222]
+  chat_allowlist: [-1001111111111, -1002222222222]   # Telegram
+  commands:
+    enabled: true                  # /status, /alertly status [cluster]
+  slack:
+    enabled: true                  # SLACK_APP_TOKEN (xapp-, connections:write)
+    channel_allowlist: [C0SDLCALRT1, C0DATAALRT1]
+    command: /alertly
 
 dedup:
   enabled: true

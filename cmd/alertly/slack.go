@@ -17,13 +17,14 @@ func newSlackSink(cfg config.Config, renderer tmpl.Renderer, dryRun bool, logger
 	}
 	limiter := slack.NewLimiter(cfg.Slack.RateLimit.GlobalPerSec, cfg.Slack.RateLimit.PerChannelPerSec)
 	client := slack.New(slack.Config{
-		APIURL:         cfg.Slack.APIURL,
-		Token:          token,
-		RequestTimeout: cfg.Slack.RequestTimeout,
-		MaxAttempts:    cfg.Slack.Retry.MaxAttempts,
-		InitialBackoff: cfg.Slack.Retry.InitialBackoff,
-		MaxBackoff:     cfg.Slack.Retry.MaxBackoff,
-		DryRun:         dryRun,
+		APIURL:           cfg.Slack.APIURL,
+		Token:            token,
+		RequestTimeout:   cfg.Slack.RequestTimeout,
+		MaxAttempts:      cfg.Slack.Retry.MaxAttempts,
+		InitialBackoff:   cfg.Slack.Retry.InitialBackoff,
+		MaxBackoff:       cfg.Slack.Retry.MaxBackoff,
+		DryRun:           dryRun,
+		ResponseURLHosts: cfg.Slack.ResponseURLHosts,
 	}, limiter, logger)
 	return slack.NewSink(client, renderer, cfg.Format.Slack == config.FormatBuiltin, cfg.Format.Labels), nil
 }

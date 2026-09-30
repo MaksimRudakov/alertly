@@ -125,6 +125,7 @@ secret:
     alertmanagerPassword: ALERTMANAGER_AUTH_PASSWORD
     alertmanagerToken: ALERTMANAGER_AUTH_TOKEN
     slackBotToken: SLACK_BOT_TOKEN
+    slackAppToken: SLACK_APP_TOKEN
   # -- Token values used only when `create: true`. `telegramBotToken` is required
   # while `config.telegram.enabled`, `slackBotToken` while `config.slack.enabled`,
   # `webhookAuthToken` unless `config.clusters` is set. Alertmanager fields are optional.
@@ -135,6 +136,8 @@ secret:
     alertmanagerPassword: ""
     alertmanagerToken: ""
     slackBotToken: ""
+    # -- Slack app-level token (xapp-, scope connections:write), required while `config.updates.slack.enabled`.
+    slackAppToken: ""
     # -- Extra Secret keys (env var name -> value), e.g. per-cluster webhook
     # tokens (`auth_token_env`) and per-cluster Alertmanager credentials
     # (`<auth_env_prefix>_TOKEN`).
@@ -260,6 +263,9 @@ config:
     request_timeout: 10s
     # Channel IDs webhook URLs may target. Empty = any channel.
     channel_allowlist: []
+    # Extra hosts trusted for slash-command response_url (e.g. GovSlack's
+    # hooks.slack-gov.com); *.slack.com is always trusted.
+    response_url_hosts: []
     rate_limit:
       per_channel_per_sec: 1
       global_per_sec: 20
@@ -334,6 +340,16 @@ config:
         pipeline: true
         watchdog_alert: "Watchdog"
         pipeline_timeout: 4s
+    # -- Silence buttons and `/alertly status` in Slack over Socket Mode
+    # (SLACK_APP_TOKEN, no inbound endpoint). Needs `config.slack.enabled`;
+    # the chat/user allowlists above are Telegram's.
+    slack:
+      enabled: false
+      # Channel IDs where buttons are attached and commands answered.
+      channel_allowlist: []
+      # Optional Slack user IDs (U…/W…). Empty = anyone in an allowed channel.
+      user_allowlist: []
+      command: /alertly
 
   # -- Alertmanager connection for the silence action. Required when updates.enabled=true.
   # Auth is supplied via env: ALERTMANAGER_AUTH_USERNAME + _PASSWORD (basic) or ALERTMANAGER_AUTH_TOKEN (bearer).

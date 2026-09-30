@@ -39,6 +39,9 @@ type Slack struct {
 	// ChannelAllowlist limits which channel IDs webhook targets may name.
 	// Empty = any channel.
 	ChannelAllowlist []string `yaml:"channel_allowlist"`
+	// ResponseURLHosts are extra hosts (host[:port]) trusted for slash
+	// command response_url, e.g. hooks.slack-gov.com; *.slack.com always is.
+	ResponseURLHosts []string `yaml:"response_url_hosts"`
 }
 
 type SlackRateLimit struct {
