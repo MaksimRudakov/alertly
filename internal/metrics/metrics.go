@@ -29,6 +29,9 @@ var (
 	UpdatesPollErrors     *prometheus.CounterVec
 	DedupSkipped          *prometheus.CounterVec
 	LabelCacheLookups     *prometheus.CounterVec
+	SlackAPIDuration      *prometheus.HistogramVec
+	SlackRetries          *prometheus.CounterVec
+	SlackRateLimited      *prometheus.CounterVec
 )
 
 func Init() *prometheus.Registry {
@@ -122,6 +125,22 @@ func Init() *prometheus.Registry {
 			Help: "Number of label-cache fallback lookups during callback handling, per result (hit/miss).",
 		}, []string{"result"})
 
+		SlackAPIDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "alertly_slack_api_duration_seconds",
+			Help:    "Duration of Slack Web API requests per method.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"method"})
+
+		SlackRetries = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_slack_retries_total",
+			Help: "Number of retries against the Slack Web API; reason deadline_skip marks retries aborted for lack of request budget.",
+		}, []string{"reason"})
+
+		SlackRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_slack_rate_limited_total",
+			Help: "Number of times a Slack channel was rate limited locally.",
+		}, []string{"channel"})
+
 		registry.MustRegister(
 			NotificationsReceived,
 			NotificationsSent,
@@ -140,6 +159,9 @@ func Init() *prometheus.Registry {
 			UpdatesPollErrors,
 			DedupSkipped,
 			LabelCacheLookups,
+			SlackAPIDuration,
+			SlackRetries,
+			SlackRateLimited,
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)

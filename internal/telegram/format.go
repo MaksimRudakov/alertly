@@ -26,7 +26,7 @@ func RenderBuiltin(n notification.Notification, labels []string) string {
 	b.WriteString(tmpl.EscapeHTML(n.Title))
 	b.WriteString("</b>\n")
 
-	b.WriteString(tmpl.EscapeHTML(strings.Join(StatusLine(n), " · ")))
+	b.WriteString(tmpl.EscapeHTML(strings.Join(n.StatusLine(), " · ")))
 
 	if body := strings.TrimSpace(n.Body); body != "" {
 		b.WriteString("\n\n")
@@ -47,28 +47,4 @@ func RenderBuiltin(n notification.Notification, labels []string) string {
 		b.WriteString(strings.Join(fields, "\n"))
 	}
 	return b.String()
-}
-
-// StatusLine is the "Firing · cluster X · critical" context shared by the
-// builtin layouts of every sink.
-func StatusLine(n notification.Notification) []string {
-	var status string
-	switch n.Status {
-	case "firing":
-		status = "Firing"
-	case "resolved":
-		status = "Resolved"
-	case "":
-		status = "Event"
-	default:
-		status = strings.ToUpper(n.Status[:1]) + n.Status[1:]
-	}
-	parts := []string{status}
-	if n.Cluster != "" {
-		parts = append(parts, "cluster "+n.Cluster)
-	}
-	if n.Severity != "" {
-		parts = append(parts, n.Severity)
-	}
-	return parts
 }

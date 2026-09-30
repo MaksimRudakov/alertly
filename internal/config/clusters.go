@@ -201,7 +201,11 @@ func (c Config) validateSinks() error {
 		return fmt.Errorf("format.telegram must be %q or %q, got %q", FormatTemplate, FormatBuiltin, c.Format.Telegram)
 	}
 	switch c.Format.Slack {
-	case FormatBuiltin, FormatTemplate:
+	case FormatBuiltin:
+	case FormatTemplate:
+		if _, ok := c.Templates["slack.default"]; c.Slack.Enabled && !ok {
+			return errors.New(`format.slack: template requires a "slack.default" entry in templates (Slack mrkdwn; "slack.<source>" entries override it)`)
+		}
 	default:
 		return fmt.Errorf("format.slack must be %q or %q, got %q", FormatBuiltin, FormatTemplate, c.Format.Slack)
 	}
