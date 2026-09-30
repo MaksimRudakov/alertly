@@ -13,8 +13,8 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 - Sources: Alertmanager (v4 webhook), Kubewatch (new + legacy payload), and a **generic JSON contract** for anything else (GitLab CI, Jira automation, ArgoCD notifications, scripts).
 - **Telegram and Slack** side by side: every notification can go to Telegram chats/topics, Slack channels/threads or both, with a **builtin layout** that reads the same in both messengers ([Slack](#slack)).
 - **Clusters and named destinations**: one alertly can serve several clusters, each with its own webhook token, Alertmanager and `destination → [telegram…, slack…]` routing; or run one alertly per cluster with the same config model ([Clusters](#clusters-and-destinations)).
-- **Interactive Silence buttons** on firing Alertmanager alerts: inline keyboard via Telegram long polling, silences created through the Alertmanager API v2 (matcher scope configurable), **↩️ Undo** window after each silence, chat/user allowlists, TTL-limited buttons. Off by default (`updates.enabled`).
-- **Chat-ops `/status`**: read-only self-health command in allowlisted chats (uptime, readiness, cache sizes). Off by default (`updates.commands.enabled`).
+- **Interactive Silence buttons** on firing Alertmanager alerts, in Telegram (long polling) and Slack (Socket Mode): silences created through the Alertmanager API v2 (matcher scope configurable), **↩️ Undo** window after each silence, chat/user allowlists, TTL-limited buttons. Off by default (`updates.enabled`).
+- **Chat-ops status**: `/status` in Telegram, `/alertly status` in Slack — self-health, per-messenger readiness and the Alertmanager/Watchdog pipeline of every cluster routed to the chat. Off by default (`updates.commands.enabled`).
 - Multiple chats and topic threads per webhook URL: `/v1/alertmanager/-100123,-100456:42`.
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
 - **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
@@ -177,7 +177,8 @@ Path from `ALERTLY_CONFIG` (default `/etc/alertly/config.yaml`). See [examples/c
 | Env | Required | Purpose |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | while `telegram.enabled` (default) | Bot token used to call the Bot API |
-| `SLACK_BOT_TOKEN` | while `slack.enabled` | Slack bot token (`xoxb-`, scope `chat:write`) |
+| `SLACK_BOT_TOKEN` | while `slack.enabled` | Slack bot token (`xoxb-`, scopes `chat:write`, `commands`) |
+| `SLACK_APP_TOKEN` | while `updates.slack.enabled` | Slack app-level token (`xapp-`, scope `connections:write`) for Socket Mode |
 | `WEBHOOK_AUTH_TOKEN` | unless `clusters` is set | Bearer token for the legacy `/v1/{source}/{chats}` routes |
 | *per cluster* `auth_token_env` | for each named cluster | Bearer token for `/v1/clusters/<cluster>/…`; must differ between clusters |
 | *per cluster* `<auth_env_prefix>_TOKEN` / `_USERNAME` + `_PASSWORD` | no | Alertmanager API auth of that cluster |
@@ -314,13 +315,32 @@ format:
   slack: builtin                 # or template: templates["slack.default"]
 ```
 
-1. Create the app from [`examples/slack-app-manifest.yaml`](./examples/slack-app-manifest.yaml) (scope `chat:write`), install it, put the Bot User OAuth Token into `SLACK_BOT_TOKEN`.
+1. Create the app from [`examples/slack-app-manifest.yaml`](./examples/slack-app-manifest.yaml), install it, put the Bot User OAuth Token into `SLACK_BOT_TOKEN`.
 2. Invite the bot to each channel (`/invite @alertly`); otherwise sends fail with `not_in_channel`.
 3. Address channels by **ID** (`C…`, from the channel details), never by name — names change, IDs do not. Config validation rejects names.
 
 Delivery uses `chat.postMessage` with the same guarantees as Telegram: global + per-channel rate limit, retry of 429/5xx/network errors with `Retry-After`, deadline-aware backoff, dedup. The builtin layout is Block Kit: header, status context, body sections, label fields, links, a severity colour bar (resolved = green). A body longer than one message allows spills into continuation messages.
 
-Each sink has its own readiness: the pod stays ready while **any** sink is, so a Slack outage does not take Telegram delivery down with it. Watch `alertly_sink_ready{sink}` for a single messenger being down. Silence buttons and `/status` are Telegram-only in this release.
+Each sink has its own readiness: the pod stays ready while **any** sink is, so a Slack outage does not take Telegram delivery down with it. Watch `alertly_sink_ready{sink}` for a single messenger being down.
+
+### Buttons and `/alertly status` in Slack
+
+```yaml
+updates:
+  enabled: true
+  commands: {enabled: true}
+  slack:
+    enabled: true                    # SLACK_APP_TOKEN=xapp-… (connections:write)
+    channel_allowlist: [C0123ABCDEF] # where buttons are attached and commands answered
+    user_allowlist: []               # optional U…/W… IDs
+    command: /alertly
+```
+
+Interactivity uses **Socket Mode**: alertly opens an outbound WebSocket to Slack (`apps.connections.open`), so no public endpoint or Ingress is needed — the same model as Telegram long polling. Envelopes are acked immediately and handled one at a time; the connection is re-established on Slack's periodic `refresh_requested` and on errors (`alertly_slack_socket_reconnects_total{reason}`).
+
+- **Silence / Undo buttons** work exactly like in Telegram (same durations, `silence_matchers`, `button_ttl`, undo window, strict window policy); the feedback is an ephemeral message to the presser, the buttons are swapped through `chat.update`. Silences are created by `slack:@<user>`.
+- **`/alertly status [cluster]`** answers in the channel (visible to everyone, like Telegram's `/status`); without an argument it covers the clusters whose destinations route to this channel. Refusals and usage go only to the caller. Replies go to Slack's `response_url`, which must be on `*.slack.com` unless listed in `slack.response_url_hosts` (GovSlack).
+- The same messenger constraint as Telegram applies: one Socket Mode consumer per app — Slack spreads events across all open connections of an app, so run interactivity in exactly one alertly per Slack App.
 
 ## Clusters and destinations
 
@@ -356,9 +376,9 @@ The same binary and config model cover both; pick by operational needs, not by c
 | Config | one `clusters` entry (or none) | one entry per cluster |
 | Blast radius | isolated | all clusters go quiet if it is down — **add an external deadman** for each cluster's Watchdog |
 | Network | in-cluster only | every AM → alertly, alertly → every AM API (for buttons) |
-| Interactive (buttons, `/status`) | a bot (and later a Slack App) **per instance** | one bot / app |
+| Interactive (buttons, `/status`) | a Telegram bot and a Slack App **per instance** | one bot / app |
 
-Messenger constraint, not an alertly one: Telegram allows **one `getUpdates` consumer per bot token** (a second one gets `409 Conflict`), so interactivity must run in exactly one alertly per bot token. Sending from many instances with the same bot is fine.
+Messenger constraint, not an alertly one: Telegram allows **one `getUpdates` consumer per bot token** (a second one gets `409 Conflict`) and Slack spreads Socket Mode events across all connections of an app, so interactivity must run in exactly one alertly per bot token / Slack App. Sending from many instances with the same bot is fine.
 
 ## Deduplication
 
@@ -423,8 +443,9 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | `alertly_auth_failures_total` | counter | — |
 | `alertly_source_parse_duration_seconds` | histogram | `source` |
 | `alertly_dedup_skipped_total` | counter | `source`, `chat_id`, `status`, `cluster`, `sink` |
-| `alertly_callbacks_received_total` | counter | `action`, `status` |
-| `alertly_commands_received_total` | counter | `command`, `status` |
+| `alertly_callbacks_received_total` | counter | `action`, `status`, `sink` |
+| `alertly_commands_received_total` | counter | `command`, `status`, `sink` |
+| `alertly_slack_socket_reconnects_total` | counter | `reason` |
 | `alertly_silences_created_total` | counter | `status` |
 | `alertly_silences_deleted_total` | counter | `status` |
 | `alertly_updates_poll_errors_total` | counter | `reason` |
@@ -456,6 +477,7 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | Buttons work intermittently, logs show `getUpdates conflict persists: another instance is polling this bot token` | two processes poll the same bot token (`409 Conflict`) | keep exactly one alertly with `updates.enabled` per bot token; stop the other replica/process or give it its own bot |
 | Slack sends fail with `not_in_channel` / `channel_not_found` | bot not invited, or a channel name used instead of an ID | `/invite @alertly` in the channel; use the `C…` channel ID |
 | `/readyz` 200 but `alertly_sink_ready{sink="slack"} 0` | Slack down or `SLACK_BOT_TOKEN` invalid (`auth.test`) while Telegram works — the pod stays ready on purpose | check the `/readyz` body `sinks.slack.reason`; rotate the token |
+| Slack buttons / `/alertly` do nothing | Socket Mode not connected: `SLACK_APP_TOKEN` missing/invalid, Socket Mode or Interactivity off in the app, channel not in `updates.slack.channel_allowlist` | logs `slack socket:`; `alertly_slack_socket_reconnects_total`; check the app settings against `examples/slack-app-manifest.yaml` |
 | `401` on `/v1/clusters/<cluster>/…` | wrong token, token of another cluster, or unknown cluster name (all look alike by design) | check the cluster's `auth_token_env` value and the path |
 | Button press answers «Failed to query Alertmanager» | `alertmanager.url` wrong/unreachable or auth missing | check `alertmanager.url`, `ALERTMANAGER_AUTH_*` env, NetworkPolicy to AM; see `alertly_updates_poll_errors_total` and logs |
 

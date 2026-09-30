@@ -202,7 +202,7 @@ func TestRespond_OnlySlackHosts(t *testing.T) {
 	}
 
 	host := strings.TrimPrefix(srv.URL, "http://")
-	c := New(Config{Token: "t", ResponseURLHost: host}, nil, discard)
+	c := New(Config{Token: "t", ResponseURLHosts: []string{host}}, nil, discard)
 	if err := c.Respond(context.Background(), srv.URL+"/hook", CommandReply{ResponseType: "in_channel", Text: "hi"}); err != nil {
 		t.Fatal(err)
 	}
