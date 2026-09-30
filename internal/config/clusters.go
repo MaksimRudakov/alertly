@@ -22,7 +22,7 @@ const (
 const DefaultCluster = "default"
 
 // DefaultAuthTokenEnv is the env var holding the legacy webhook token.
-const DefaultAuthTokenEnv = "WEBHOOK_AUTH_TOKEN"
+const DefaultAuthTokenEnv = "WEBHOOK_AUTH_TOKEN" // #nosec G101 -- env var name, not a credential
 
 // MaxClusterAlias bounds the alias carried in Telegram callback_data (64-byte
 // limit shared with the fingerprint and duration).

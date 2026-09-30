@@ -1,0 +1,50 @@
+# Helm values for a central alertly serving several clusters (see
+# examples/config-multicluster.yaml for the config itself).
+#
+# Tokens come from an existing Secret (external-secrets / sealed-secrets):
+#   TELEGRAM_BOT_TOKEN, SLACK_BOT_TOKEN,
+#   WEBHOOK_AUTH_TOKEN_K8S_PROD, WEBHOOK_AUTH_TOKEN_K8S_SDLC, WEBHOOK_AUTH_TOKEN_K8S_DATA,
+#   ALERTMANAGER_K8S_PROD_TOKEN
+# Interactive buttons need exactly one replica per bot token.
+
+replicaCount: 1
+
+secret:
+  create: false
+  existingSecret: alertly-tokens
+
+config:
+  telegram:
+    enabled: true
+    chat_allowlist: [-1001111111111, -1002222222222]
+  slack:
+    enabled: true
+    channel_allowlist: [C0SDLCALRT1, C0DATAALRT1]
+  format:
+    telegram: builtin
+    slack: builtin
+  clusters:
+    k8s-prod:
+      alias: prod
+      auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_PROD
+      alertmanager:
+        url: http://alertmanager-k8s-prod.internal:9093
+        auth_env_prefix: ALERTMANAGER_K8S_PROD
+      destinations:
+        default:
+          - telegram: "-1001111111111:42"
+    k8s-sdlc:
+      alias: sdlc
+      auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_SDLC
+      alertmanager:
+        url: http://alertmanager-k8s-sdlc.internal:9093
+      destinations:
+        default:
+          - telegram: "-1002222222222"
+          - slack: "C0SDLCALRT1"
+  updates:
+    enabled: true
+    chat_allowlist: [-1001111111111, -1002222222222]
+
+# Egress to Slack must be allowed next to api.telegram.org:
+#   slack.com:443 (Web API)

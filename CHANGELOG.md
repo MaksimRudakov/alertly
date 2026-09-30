@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+Slack as a second messenger and multi-cluster routing. Backward compatible for existing configs: without `slack` and `clusters` blocks alertly behaves exactly as 0.7.x (same routes, message format, silence button data). One breaking detail for dashboards: see *Changed → metrics*.
+
+### Added
+- **Slack sink** (`slack.enabled`, `SLACK_BOT_TOKEN`): delivery via `chat.postMessage` with a global + per-channel rate limiter, retry of 429/5xx/network errors (and Slack's `ok:false` server-side codes) honouring `Retry-After`, deadline-aware backoff and dedup — the same delivery guarantees as Telegram. `slack.channel_allowlist` mirrors `telegram.chat_allowlist`. Channels are addressed by ID; names are rejected at startup.
+- **Builtin layout** (`format.telegram` / `format.slack`: `builtin` | `template`): one structure in both messengers — title, `Firing · cluster · severity`, body, the `format.labels` keys, links; Block Kit with a severity colour bar in Slack. Defaults keep Telegram on your templates (`template`) and Slack on `builtin`. Slack templates are `templates["slack.<source>"]` with fallback `templates["slack.default"]`; new template function `escape_slack`; `.Cluster` in the template data.
+- **Clusters and named destinations** (`clusters.<name>`): each cluster has its own webhook token (`auth_token_env`), Alertmanager (`alertmanager.url`, `auth_env_prefix`), Watchdog name and `destinations.<name>: [{telegram: "chat[:thread]"} | {slack: "channel[:thread_ts]"}]`, served on `POST /v1/clusters/{cluster}/{source}/{destination}`. A cluster token opens only its own path; an unknown cluster answers like a wrong token. Without `clusters` an implicit `default` cluster serves the legacy route.
+- The legacy `/v1/{source}/{chats}` route accepts `tg:` and `slack:` target prefixes (`-100123:42,slack:C0123ABCDEF`).
+- **Per-sink readiness**: `/readyz` stays ready while any sink is (one messenger's outage no longer takes the pod out of the Service), reports every sink in its body (`sinks.<name>.ready/reason`) and `alertly_sink_ready{sink}` exposes a single messenger being down. Each sink is probed continuously (`getMe` / `auth.test`).
+- Webhook responses break attempts/errors down per sink (`"sinks":{…}`); sinks are delivered in parallel, so a slow messenger no longer eats another's share of the request budget.
+- Metrics `alertly_slack_api_duration_seconds{method}`, `alertly_slack_retries_total{reason}`, `alertly_slack_rate_limited_total{channel}`.
+- Helm chart: `config.slack`, `config.format`, `config.clusters`, `config.telegram.enabled`; `secret.values.slackBotToken` and `secret.values.extra` (per-cluster tokens, AM credentials). Examples: `examples/config-multicluster.yaml`, `examples/values-multicluster.yaml`, `examples/slack-app-manifest.yaml`.
+
+### Changed
+- **Metrics**: `alertly_notifications_received_total` gains `cluster`, `alertly_notifications_sent_total` gains `sink`, `alertly_dedup_skipped_total` gains `cluster` and `sink`. Queries that match exact label sets need a `sum by (…)`; label names that existed keep their meaning (`chat_id` now also carries Slack channel IDs).
+- Dedup, the label cache and the silence-button tracker are keyed by cluster: identical Alertmanager fingerprints from different clusters no longer suppress each other. Silence buttons of named clusters carry the cluster alias (`s|<alias>|<fp>|<dur>`) and silence in that cluster's Alertmanager; the default cluster keeps the 0.7 format, so buttons already in chats keep working.
+- `TELEGRAM_BOT_TOKEN` is required only while `telegram.enabled` (new, default `true`); `WEBHOOK_AUTH_TOKEN` only when no `clusters` are defined. `updates.enabled` requires Telegram and an Alertmanager on at least one cluster.
+
 ### Fixed
 - **The chart `.tgz` attached to GitHub Releases now verifies against its Sigstore bundle.** Since 0.7.2 the release workflow signed a second `helm package` of the chart instead of the tarball chart-releaser had attached to the release, and the two differ byte-wise — so `cosign verify-blob` against `alertly-<version>.tgz` failed with `invalid signature` for 0.7.2–0.7.4 (image and OCI chart signatures were never affected). The workflow now signs and pushes to OCI the exact release asset, verifies the bundle before publishing it, and fails the release if the OCI chart and the release asset differ. For 0.7.2–0.7.4, verify the chart via OCI instead.
 

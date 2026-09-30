@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -188,5 +189,20 @@ func TestValidate_SlackTemplateNeedsDefault(t *testing.T) {
 	c.Templates = map[string]string{"default": "x", "slack.default": "*{{ .Title }}*"}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+// The shipped examples are documentation users copy: they must load.
+func TestExamplesLoad(t *testing.T) {
+	for _, name := range []string{"config.yaml", "config-multicluster.yaml"} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(filepath.Join("..", "..", "examples", name))
+			if err != nil {
+				t.Fatalf("load %s: %v", name, err)
+			}
+			if name == "config-multicluster.yaml" && len(cfg.ResolvedClusters()) != 4 {
+				t.Errorf("want 3 clusters + implicit default, got %d", len(cfg.ResolvedClusters()))
+			}
+		})
 	}
 }

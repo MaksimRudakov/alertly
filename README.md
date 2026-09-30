@@ -11,12 +11,14 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 ## Features
 
 - Sources: Alertmanager (v4 webhook), Kubewatch (new + legacy payload), and a **generic JSON contract** for anything else (GitLab CI, Jira automation, ArgoCD notifications, scripts).
+- **Telegram and Slack** side by side: every notification can go to Telegram chats/topics, Slack channels/threads or both, with a **builtin layout** that reads the same in both messengers ([Slack](#slack)).
+- **Clusters and named destinations**: one alertly can serve several clusters, each with its own webhook token, Alertmanager and `destination → [telegram…, slack…]` routing; or run one alertly per cluster with the same config model ([Clusters](#clusters-and-destinations)).
 - **Interactive Silence buttons** on firing Alertmanager alerts: inline keyboard via Telegram long polling, silences created through the Alertmanager API v2 (matcher scope configurable), **↩️ Undo** window after each silence, chat/user allowlists, TTL-limited buttons. Off by default (`updates.enabled`).
 - **Chat-ops `/status`**: read-only self-health command in allowlisted chats (uptime, readiness, cache sizes). Off by default (`updates.commands.enabled`).
 - Multiple chats and topic threads per webhook URL: `/v1/alertmanager/-100123,-100456:42`.
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
 - **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
-- **In-process deduplication** by `(fingerprint, chat, status)` with TTL — suppresses duplicate Telegram messages caused by Alertmanager re-sending a webhook it didn't get an ACK for.
+- **In-process deduplication** by `(cluster, fingerprint, target, status)` with TTL — suppresses duplicate messages caused by Alertmanager re-sending a webhook it didn't get an ACK for.
 - Message splitting >4096 UTF-16 units (Telegram's own unit — an emoji counts as two) on paragraph/line/word boundaries; HTML formatting survives the cut: tags open at the boundary are closed and reopened on the next part.
 - `text/template` rendering with helpers (`severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`).
 - Bearer-token webhook auth; optional `telegram.chat_allowlist` restricting which chats webhook URLs may target.
@@ -159,12 +161,14 @@ Full list of values with defaults and descriptions: [`charts/alertly/README.md`]
 | `POST` | `/v1/alertmanager/{chats}` | Bearer | Alertmanager webhook |
 | `POST` | `/v1/kubewatch/{chats}` | Bearer | Kubewatch webhook |
 | `POST` | `/v1/generic/{chats}` | Bearer | Generic JSON events ([contract](#generic-webhook-source)) |
+| `POST` | `/v1/clusters/{cluster}/{source}/{destination}` | Bearer (per cluster) | Any source for a named cluster and destination ([Clusters](#clusters-and-destinations)) |
 | `GET`  | `/healthz` | — | Liveness |
 | `GET`  | `/readyz`  | — | Readiness (periodic `getMe` probe + recent send health) |
 | `GET`  | `/metrics` | — | Prometheus metrics |
 
-`{chats}` accepts a comma-separated list of chat IDs with an optional thread:
-`-1001234567890,-100456:42`. Auth: `Authorization: Bearer ${WEBHOOK_AUTH_TOKEN}`.
+`{chats}` accepts a comma-separated list of targets: a bare chat ID with an optional thread is Telegram (`-1001234567890,-100456:42`); `tg:` and `slack:` prefixes name the sink explicitly (`tg:-100456:42,slack:C0123ABCDEF`, a Slack thread as `slack:C0123ABCDEF:1712345678.000100`). Auth: `Authorization: Bearer ${WEBHOOK_AUTH_TOKEN}`.
+
+Every webhook answers `200` (all delivered), `204` (nothing to send), `207` (partial — e.g. one messenger down) or `500` (all failed), with a per-sink breakdown: `{"attempts":2,"errors":1,"sinks":{"slack":{"attempts":1,"errors":1},"telegram":{"attempts":1,"errors":0}}}`.
 
 ## Configuration
 
@@ -172,8 +176,11 @@ Path from `ALERTLY_CONFIG` (default `/etc/alertly/config.yaml`). See [examples/c
 
 | Env | Required | Purpose |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | yes | Bot token used to call the Bot API |
-| `WEBHOOK_AUTH_TOKEN` | yes | Bearer token clients must present |
+| `TELEGRAM_BOT_TOKEN` | while `telegram.enabled` (default) | Bot token used to call the Bot API |
+| `SLACK_BOT_TOKEN` | while `slack.enabled` | Slack bot token (`xoxb-`, scope `chat:write`) |
+| `WEBHOOK_AUTH_TOKEN` | unless `clusters` is set | Bearer token for the legacy `/v1/{source}/{chats}` routes |
+| *per cluster* `auth_token_env` | for each named cluster | Bearer token for `/v1/clusters/<cluster>/…`; must differ between clusters |
+| *per cluster* `<auth_env_prefix>_TOKEN` / `_USERNAME` + `_PASSWORD` | no | Alertmanager API auth of that cluster |
 | `ALERTLY_CONFIG` | no  | Path to config (default `/etc/alertly/config.yaml`) |
 | `LOG_LEVEL` | no  | Override `logging.level` from config |
 | `DRY_RUN`   | no  | When `true`, skip Telegram calls but log/meter |
@@ -184,7 +191,9 @@ Hot reload of config is intentionally **not** supported in-process — use [`sta
 
 ## Templates
 
-Stored inline in YAML, parsed via `text/template`. Helper funcs: `severity_emoji`, `escape_html`, `truncate`, `join`, `humanize_duration`. A template named per source (`alertmanager`, `kubewatch`) is preferred; falls back to `default`.
+Stored inline in YAML, parsed via `text/template`. Helper funcs: `severity_emoji`, `escape_html`, `escape_slack`, `truncate`, `join`, `humanize_duration`. A template named per source (`alertmanager`, `kubewatch`) is preferred; falls back to `default`. The data model also carries `.Cluster` (empty in single-cluster mode).
+
+Rendering is chosen per sink by `format`: `template` (default for Telegram, keeps your `templates.*`) or `builtin` — alertly's own layout, structurally identical in Telegram and Slack (title, `Firing · cluster · severity`, body, the `format.labels` keys, links). Slack templates live under `templates["slack.<source>"]` with fallback `templates["slack.default"]` and produce mrkdwn (escape with `escape_slack`).
 
 > **Escaping**: templates are `text/template`, not `html/template` — there is no auto-escaping. With `parse_mode: HTML`, always pipe user-controlled fields (`.Title`, `.Body`, `.Labels`, `.Annotations`) through `escape_html`, otherwise a label containing `<` or `&` makes Telegram reject the whole message with 400.
 
@@ -295,6 +304,62 @@ data:
 
 Jira Automation: add a «Send web request» action with the same JSON body and the `Authorization: Bearer …` header.
 
+## Slack
+
+```yaml
+slack:
+  enabled: true                  # SLACK_BOT_TOKEN=xoxb-…
+  channel_allowlist: [C0123ABCDEF]
+format:
+  slack: builtin                 # or template: templates["slack.default"]
+```
+
+1. Create the app from [`examples/slack-app-manifest.yaml`](./examples/slack-app-manifest.yaml) (scope `chat:write`), install it, put the Bot User OAuth Token into `SLACK_BOT_TOKEN`.
+2. Invite the bot to each channel (`/invite @alertly`); otherwise sends fail with `not_in_channel`.
+3. Address channels by **ID** (`C…`, from the channel details), never by name — names change, IDs do not. Config validation rejects names.
+
+Delivery uses `chat.postMessage` with the same guarantees as Telegram: global + per-channel rate limit, retry of 429/5xx/network errors with `Retry-After`, deadline-aware backoff, dedup. The builtin layout is Block Kit: header, status context, body sections, label fields, links, a severity colour bar (resolved = green). A body longer than one message allows spills into continuation messages.
+
+Each sink has its own readiness: the pod stays ready while **any** sink is, so a Slack outage does not take Telegram delivery down with it. Watch `alertly_sink_ready{sink}` for a single messenger being down. Silence buttons and `/status` are Telegram-only in this release.
+
+## Clusters and destinations
+
+Without a `clusters` block alertly runs exactly as before: one implicit `default` cluster behind `/v1/{source}/{chats}`. Defining clusters adds a second route with **named destinations**, so routing lives in alertly's config instead of in every caller's URL:
+
+```yaml
+clusters:
+  k8s-prod:
+    alias: prod                        # <= 8 chars, used in silence button data
+    auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_PROD
+    alertmanager:
+      url: http://alertmanager-k8s-prod.internal:9093
+      auth_env_prefix: ALERTMANAGER_K8S_PROD
+    destinations:
+      default:
+        - telegram: "-1001111111111:42"
+        - slack: "C0123ABCDEF"
+```
+
+Alertmanager of `k8s-prod` then posts to `/v1/clusters/k8s-prod/alertmanager/default` with its own token. Full example: [`examples/config-multicluster.yaml`](./examples/config-multicluster.yaml), Helm: [`examples/values-multicluster.yaml`](./examples/values-multicluster.yaml).
+
+- **Tokens are per cluster**: a cluster's token only opens its own path; an unknown cluster answers exactly like a wrong token (`401`), an unknown destination `404`. Cluster tokens must differ from each other and from `WEBHOOK_AUTH_TOKEN`.
+- **State is keyed by cluster**: Alertmanager fingerprints are label hashes, so the same alert in two clusters without a `cluster` external label shares one — dedup, the label cache and silence buttons keep them apart.
+- **Silence buttons** go to the Alertmanager of the cluster the alert came from (`s|<alias>|<fp>|<duration>`); the default cluster keeps the old `s|<fp>|<duration>` format, so buttons already in chats keep working. Clusters without `alertmanager.url` get no buttons.
+- Messages name the cluster (`Firing · cluster k8s-prod · critical` in the builtin layout, `.Cluster` in templates).
+
+### Deployment topologies
+
+The same binary and config model cover both; pick by operational needs, not by code:
+
+| | One alertly per cluster | One central alertly |
+|---|---|---|
+| Config | one `clusters` entry (or none) | one entry per cluster |
+| Blast radius | isolated | all clusters go quiet if it is down — **add an external deadman** for each cluster's Watchdog |
+| Network | in-cluster only | every AM → alertly, alertly → every AM API (for buttons) |
+| Interactive (buttons, `/status`) | a bot (and later a Slack App) **per instance** | one bot / app |
+
+Messenger constraint, not an alertly one: Telegram allows **one `getUpdates` consumer per bot token** (a second one gets `409 Conflict`), so interactivity must run in exactly one alertly per bot token. Sending from many instances with the same bot is fine.
+
 ## Deduplication
 
 Telegram has no idempotency key, so any retry from upstream — most commonly Alertmanager re-sending a webhook because the previous response did not arrive in time — would be delivered as a fresh chat message. alertly absorbs that retry with a small in-process cache.
@@ -344,8 +409,12 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 
 | Metric | Type | Labels |
 |---|---|---|
-| `alertly_notifications_received_total` | counter | `source`, `status_code` |
-| `alertly_notifications_sent_total` | counter | `chat_id`, `status` |
+| `alertly_notifications_received_total` | counter | `source`, `status_code`, `cluster` |
+| `alertly_notifications_sent_total` | counter | `chat_id` (Telegram chat or Slack channel), `status`, `sink` |
+| `alertly_sink_ready` | gauge | `sink` |
+| `alertly_slack_api_duration_seconds` | histogram | `method` |
+| `alertly_slack_retries_total` | counter | `reason` |
+| `alertly_slack_rate_limited_total` | counter | `channel` |
 | `alertly_telegram_api_duration_seconds` | histogram | — |
 | `alertly_telegram_retries_total` | counter | `reason` |
 | `alertly_telegram_rate_limited_total` | counter | `chat_id` |
@@ -353,7 +422,7 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | `alertly_message_split_total` | counter | — |
 | `alertly_auth_failures_total` | counter | — |
 | `alertly_source_parse_duration_seconds` | histogram | `source` |
-| `alertly_dedup_skipped_total` | counter | `source`, `chat_id`, `status` |
+| `alertly_dedup_skipped_total` | counter | `source`, `chat_id`, `status`, `cluster`, `sink` |
 | `alertly_callbacks_received_total` | counter | `action`, `status` |
 | `alertly_commands_received_total` | counter | `command`, `status` |
 | `alertly_silences_created_total` | counter | `status` |
@@ -385,6 +454,9 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | Silence buttons not shown on alerts | `updates.enabled: false`, chat not in `chat_allowlist`, or alert not `firing` | enable updates, add the chat ID to `updates.chat_allowlist`; buttons are only attached to firing Alertmanager alerts |
 | Button press answers «Silence window expired» | button older than `updates.button_ttl` or alertly restarted since the message was sent | expected (strict policy); re-fire the alert or silence via AM UI |
 | Buttons work intermittently, logs show `getUpdates conflict persists: another instance is polling this bot token` | two processes poll the same bot token (`409 Conflict`) | keep exactly one alertly with `updates.enabled` per bot token; stop the other replica/process or give it its own bot |
+| Slack sends fail with `not_in_channel` / `channel_not_found` | bot not invited, or a channel name used instead of an ID | `/invite @alertly` in the channel; use the `C…` channel ID |
+| `/readyz` 200 but `alertly_sink_ready{sink="slack"} 0` | Slack down or `SLACK_BOT_TOKEN` invalid (`auth.test`) while Telegram works — the pod stays ready on purpose | check the `/readyz` body `sinks.slack.reason`; rotate the token |
+| `401` on `/v1/clusters/<cluster>/…` | wrong token, token of another cluster, or unknown cluster name (all look alike by design) | check the cluster's `auth_token_env` value and the path |
 | Button press answers «Failed to query Alertmanager» | `alertmanager.url` wrong/unreachable or auth missing | check `alertmanager.url`, `ALERTMANAGER_AUTH_*` env, NetworkPolicy to AM; see `alertly_updates_poll_errors_total` and logs |
 
 ## Architecture
