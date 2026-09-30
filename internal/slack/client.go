@@ -27,6 +27,9 @@ type Config struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	DryRun         bool
+	// ResponseURLHost additionally allows response_url on this host (tests
+	// and e2e against a fake Slack); production leaves it empty.
+	ResponseURLHost string
 }
 
 // Client is the subset of the Slack Web API alertly uses.
@@ -34,7 +37,20 @@ type Client interface {
 	// PostMessage posts to a channel (optionally into a thread) and returns
 	// the message ts.
 	PostMessage(ctx context.Context, msg Message) (string, error)
+	// UpdateMessage replaces text/attachments of a posted message (chat.update).
+	UpdateMessage(ctx context.Context, ts string, msg Message) error
+	// PostEphemeral shows text to one user only (chat.postEphemeral).
+	PostEphemeral(ctx context.Context, channel, user, threadTS, text string) error
+	// Respond posts a slash-command reply to its response_url.
+	Respond(ctx context.Context, responseURL string, reply CommandReply) error
 	AuthTest(ctx context.Context) error
+}
+
+// CommandReply is a slash-command response posted to response_url.
+type CommandReply struct {
+	ResponseType string       `json:"response_type"` // in_channel | ephemeral
+	Text         string       `json:"text"`
+	Attachments  []Attachment `json:"attachments,omitempty"`
 }
 
 // Message is a chat.postMessage request.
@@ -148,6 +164,88 @@ func (c *client) PostMessage(ctx context.Context, msg Message) (string, error) {
 	}
 	_ = json.Unmarshal(raw, &resp)
 	return resp.TS, nil
+}
+
+func (c *client) UpdateMessage(ctx context.Context, ts string, msg Message) error {
+	if c.cfg.DryRun {
+		return nil
+	}
+	req := struct {
+		Message
+		TS string `json:"ts"`
+	}{Message: msg, TS: ts}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal chat.update: %w", err)
+	}
+	_, err = c.callWithRetry(ctx, "chat.update", body, c.channelWait(msg.Channel))
+	return err
+}
+
+func (c *client) PostEphemeral(ctx context.Context, channel, user, threadTS, text string) error {
+	if c.cfg.DryRun {
+		return nil
+	}
+	body, err := json.Marshal(map[string]string{"channel": channel, "user": user, "thread_ts": threadTS, "text": text})
+	if err != nil {
+		return fmt.Errorf("marshal chat.postEphemeral: %w", err)
+	}
+	_, err = c.callWithRetry(ctx, "chat.postEphemeral", body, c.channelWait(channel))
+	return err
+}
+
+// Respond posts to a response_url. The URL itself authorises the call (it is
+// valid for 30 minutes and 5 uses), so no token is sent; only Slack-hosted
+// URLs are accepted so a forged payload cannot turn alertly into a proxy.
+func (c *client) Respond(ctx context.Context, responseURL string, reply CommandReply) error {
+	if c.cfg.DryRun {
+		return nil
+	}
+	u, err := url.Parse(responseURL)
+	if err != nil || !c.responseURLAllowed(u) {
+		return fmt.Errorf("refusing response_url outside slack.com")
+	}
+	body, err := json.Marshal(reply)
+	if err != nil {
+		return fmt.Errorf("marshal slash command reply: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, responseURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build response_url request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	start := time.Now()
+	resp, err := c.http.Do(req)
+	metrics.SlackAPIDuration.WithLabelValues("response_url").Observe(time.Since(start).Seconds())
+	if err != nil {
+		return fmt.Errorf("response_url: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &APIError{StatusCode: resp.StatusCode}
+	}
+	return nil
+}
+
+func (c *client) responseURLAllowed(u *url.URL) bool {
+	if c.cfg.ResponseURLHost != "" && u.Host == c.cfg.ResponseURLHost {
+		return true
+	}
+	host := u.Hostname()
+	return u.Scheme == "https" && (host == "slack.com" || strings.HasSuffix(host, ".slack.com"))
+}
+
+func (c *client) channelWait(channel string) func(context.Context) error {
+	if c.limiter == nil {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		if _, err := c.limiter.Wait(ctx, channel); err != nil {
+			return fmt.Errorf("rate limiter wait: %w", err)
+		}
+		return nil
+	}
 }
 
 func (c *client) AuthTest(ctx context.Context) error {

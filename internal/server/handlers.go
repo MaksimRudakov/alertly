@@ -40,7 +40,7 @@ type webhookDeps struct {
 // ButtonRegistrar records sent alert messages so the callback handler can
 // validate and the sweeper can expire them.
 type ButtonRegistrar interface {
-	RegisterRef(cluster string, ref sink.MessageRef, fingerprint string)
+	RegisterRef(cluster string, ref sink.MessageRef, fingerprint string, part sink.Part)
 }
 
 // KeyboardBuilder returns the buttons for a given cluster + target +
@@ -237,7 +237,7 @@ func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, clu
 		sentAny = true
 		metrics.NotificationsSent.WithLabelValues(target.Chat, "ok", target.Sink).Inc()
 		if isLastPart && actions != nil && d.tracker != nil && ref.ID != "" && ref.ID != "0" {
-			d.tracker.RegisterRef(cluster.Name, ref, n.Fingerprint)
+			d.tracker.RegisterRef(cluster.Name, ref, n.Fingerprint, part)
 		}
 	}
 	// Roll back the reservation only when nothing was delivered: the caller's

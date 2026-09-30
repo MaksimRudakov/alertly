@@ -32,6 +32,7 @@ var (
 	SlackAPIDuration      *prometheus.HistogramVec
 	SlackRetries          *prometheus.CounterVec
 	SlackRateLimited      *prometheus.CounterVec
+	SlackSocketReconnects *prometheus.CounterVec
 )
 
 func Init() *prometheus.Registry {
@@ -92,13 +93,13 @@ func Init() *prometheus.Registry {
 
 		CallbacksReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_callbacks_received_total",
-			Help: "Number of Telegram callback_query events handled per action and outcome.",
-		}, []string{"action", "status"})
+			Help: "Number of button presses handled per action, outcome and sink.",
+		}, []string{"action", "status", "sink"})
 
 		CommandsReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_commands_received_total",
-			Help: "Number of chat-ops commands handled per command and outcome. Unknown commands are labelled command=\"unknown\".",
-		}, []string{"command", "status"})
+			Help: "Number of chat-ops commands handled per command, outcome and sink. Unknown commands are labelled command=\"unknown\".",
+		}, []string{"command", "status", "sink"})
 
 		SilencesCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_silences_created_total",
@@ -136,6 +137,11 @@ func Init() *prometheus.Registry {
 			Help: "Number of retries against the Slack Web API; reason deadline_skip marks retries aborted for lack of request budget.",
 		}, []string{"reason"})
 
+		SlackSocketReconnects = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_slack_socket_reconnects_total",
+			Help: "Number of Slack Socket Mode reconnects per reason (refresh_requested, error, …).",
+		}, []string{"reason"})
+
 		SlackRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_slack_rate_limited_total",
 			Help: "Number of times a Slack channel was rate limited locally.",
@@ -162,6 +168,7 @@ func Init() *prometheus.Registry {
 			SlackAPIDuration,
 			SlackRetries,
 			SlackRateLimited,
+			SlackSocketReconnects,
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)

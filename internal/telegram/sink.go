@@ -72,6 +72,18 @@ func (s *Sink) Send(ctx context.Context, t sink.Target, p sink.Part, actions *si
 	return sink.MessageRef{Sink: sink.Telegram, Chat: t.Chat, ID: strconv.FormatInt(msgID, 10)}, nil
 }
 
+func (s *Sink) SetActions(ctx context.Context, ref sink.MessageRef, _ sink.Part, actions *sink.Actions) error {
+	chatID, err := strconv.ParseInt(ref.Chat, 10, 64)
+	if err != nil {
+		return fmt.Errorf("telegram ref: invalid chat id %q", ref.Chat)
+	}
+	msgID, err := strconv.ParseInt(ref.ID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("telegram ref: invalid message id %q", ref.ID)
+	}
+	return s.client.EditMessageReplyMarkup(ctx, chatID, msgID, Keyboard(actions))
+}
+
 func (s *Sink) Probe(ctx context.Context) error { return s.client.GetMe(ctx) }
 
 func (s *Sink) Classify(err error) sink.ErrorClass {

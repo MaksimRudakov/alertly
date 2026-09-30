@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/server"
 	"github.com/MaksimRudakov/alertly/internal/sink"
+	"github.com/MaksimRudakov/alertly/internal/slack"
 	"github.com/MaksimRudakov/alertly/internal/source"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 	tmpl "github.com/MaksimRudakov/alertly/internal/template"
@@ -123,7 +125,7 @@ func run() error {
 		StartedAt: time.Now(),
 		Version:   version.Version,
 		Commit:    version.Commit,
-		Readiness: trackers[sink.Telegram],
+		Sinks:     readiness,
 		Activity:  activity,
 	}
 	if dedupCache != nil {
@@ -140,7 +142,7 @@ func run() error {
 			logger.Warn("updates.enabled=true ignored under DRY_RUN")
 		} else {
 			var err error
-			keyboard, trackerReg, bgWorkers, err = setupUpdates(cfg, tgClient, logger, status, clusters)
+			keyboard, trackerReg, bgWorkers, err = setupUpdates(cfg, tgClient, sinks, logger, status, clusters)
 			if err != nil {
 				return fmt.Errorf("updates: %w", err)
 			}
@@ -268,27 +270,7 @@ func buildClusters(cfg config.Config) (map[string]*server.Cluster, map[string]st
 	return clusters, tokens, nil
 }
 
-// pipelineCluster picks the cluster whose Alertmanager /status reports on:
-// the default cluster when it has one, else the first cluster (by name) that
-// does. Multi-cluster /status is a later stage.
-func pipelineCluster(clusters map[string]*server.Cluster) *server.Cluster {
-	if c := clusters[config.DefaultCluster]; c != nil && c.AM != nil {
-		return c
-	}
-	names := make([]string, 0, len(clusters))
-	for n := range clusters {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		if clusters[n].AM != nil {
-			return clusters[n]
-		}
-	}
-	return nil
-}
-
-func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logger, status *server.StatusReporter, clusters map[string]*server.Cluster) (server.KeyboardBuilder, server.ButtonRegistrar, []func(context.Context), error) {
+func setupUpdates(cfg config.Config, tgClient telegram.Client, sinks map[string]sink.Sink, logger *slog.Logger, status *server.StatusReporter, clusters map[string]*server.Cluster) (server.KeyboardBuilder, server.ButtonRegistrar, []func(context.Context), error) {
 	cache := alertmanager.NewLabelCache(cfg.Updates.LabelCacheTTL, cfg.Updates.LabelCacheMax)
 	tracker := server.NewButtonTracker(cfg.Updates.ButtonTTL, cfg.Updates.ButtonTrackerMax)
 	metrics.RegisterSizeGauge("alertly_label_cache_entries",
@@ -317,24 +299,42 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		byAlias[c.Alias] = c
 	}
 
+	telegramInteractive := cfg.Telegram.Enabled && len(cfg.Updates.ChatAllowlist) > 0
+	slackInteractive := cfg.Updates.Slack.Enabled
+	access := map[string]server.AccessPolicy{}
+	if telegramInteractive {
+		access[sink.Telegram] = server.AccessPolicy{
+			Chats: int64sToStrings(cfg.Updates.ChatAllowlist),
+			Users: int64sToStrings(cfg.Updates.UserAllowlist),
+		}
+	}
+	if slackInteractive {
+		access[sink.Slack] = server.AccessPolicy{Chats: cfg.Updates.Slack.ChannelAllowlist, Users: cfg.Updates.Slack.UserAllowlist}
+	}
+
 	handler := server.NewCallbackHandler(server.CallbackDeps{
 		Logger:          logger,
 		Telegram:        tgClient,
 		Clusters:        byAlias,
 		Cache:           cache,
 		Tracker:         tracker,
-		ChatAllowlist:   cfg.Updates.ChatAllowlist,
-		UserAllowlist:   cfg.Updates.UserAllowlist,
+		Access:          access,
 		Durations:       durations,
 		SilenceMatchers: cfg.Updates.SilenceMatchers,
 		UndoTracker:     undoTracker,
+		Sinks:           sinks,
 	})
 
 	keyboard := &server.AlertmanagerKeyboard{
-		Durations:     cfg.Updates.SilenceDurations,
-		ChatAllowlist: cfg.Updates.ChatAllowlist,
-		Cache:         cache,
-		Logger:        logger,
+		Durations: cfg.Updates.SilenceDurations,
+		Cache:     cache,
+		Logger:    logger,
+	}
+	if telegramInteractive {
+		keyboard.ChatAllowlist = cfg.Updates.ChatAllowlist
+	}
+	if slackInteractive {
+		keyboard.SlackChannels = cfg.Updates.Slack.ChannelAllowlist
 	}
 
 	status.Sizes = append(status.Sizes,
@@ -347,46 +347,60 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 
 	var msgHandler *server.MessageHandler
 	if cfg.Updates.Commands.Enabled {
-		if pc := pipelineCluster(clusters); pc != nil {
-			status.AM = pc.AM
-			status.Pipeline = server.PipelineConfig{
-				Enabled:       cfg.Updates.Commands.Status.Pipeline,
-				WatchdogAlert: pc.WatchdogAlert,
-				Timeout:       cfg.Updates.Commands.Status.PipelineTimeout,
-			}
+		ordered := make([]*server.Cluster, 0, len(clusters))
+		for _, c := range clusters {
+			ordered = append(ordered, c)
+		}
+		sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
+		status.Clusters = ordered
+		status.Pipeline = server.PipelineConfig{
+			Enabled: cfg.Updates.Commands.Status.Pipeline,
+			Timeout: cfg.Updates.Commands.Status.PipelineTimeout,
 		}
 		msgHandler = server.NewMessageHandler(server.CommandDeps{
-			Logger:        logger,
-			Telegram:      tgClient,
-			ChatAllowlist: cfg.Updates.ChatAllowlist,
-			UserAllowlist: cfg.Updates.UserAllowlist,
-			Status:        status,
+			Logger:   logger,
+			Telegram: tgClient,
+			Access:   access,
+			Status:   status,
+			Clusters: clusters,
 		})
 	}
 
-	poller := &server.UpdatesPoller{
-		Client:      tgClient,
-		Handler:     handler,
-		Messages:    msgHandler,
-		Logger:      logger,
-		PollTimeout: cfg.Updates.PollTimeout,
-	}
-
-	sweeper := &server.ButtonSweeper{
-		Tracker:  tracker,
-		Telegram: tgClient,
-		Logger:   logger,
-		Interval: time.Minute,
-	}
-
-	workers := []func(context.Context){poller.Run, sweeper.Run}
-	if undoTracker != nil {
-		undoSweeper := &server.ButtonSweeper{
-			Tracker:  undoTracker,
-			Telegram: tgClient,
-			Logger:   logger,
-			Interval: 30 * time.Second,
+	var workers []func(context.Context)
+	if telegramInteractive {
+		poller := &server.UpdatesPoller{
+			Client:      tgClient,
+			Handler:     handler,
+			Messages:    msgHandler,
+			Logger:      logger,
+			PollTimeout: cfg.Updates.PollTimeout,
 		}
+		workers = append(workers, poller.Run)
+	}
+	if slackInteractive {
+		appToken := requireEnv("SLACK_APP_TOKEN")
+		if appToken == "" {
+			return nil, nil, nil, errors.New("SLACK_APP_TOKEN is required when updates.slack.enabled is true")
+		}
+		slackSink, ok := sinks[sink.Slack].(*slack.Sink)
+		if !ok {
+			return nil, nil, nil, errors.New("updates.slack.enabled requires the slack sink")
+		}
+		si := &server.SlackInteractive{
+			Socket:    slack.NewSocket(slack.SocketConfig{APIURL: cfg.Slack.APIURL, AppToken: appToken, Logger: logger}),
+			Client:    slackSink.Client(),
+			Callbacks: handler,
+			Commands:  msgHandler,
+			Command:   cfg.Updates.Slack.Command,
+			Logger:    logger,
+		}
+		workers = append(workers, si.Run)
+	}
+
+	sweeper := &server.ButtonSweeper{Tracker: tracker, Telegram: tgClient, Sinks: sinks, Logger: logger, Interval: time.Minute}
+	workers = append(workers, sweeper.Run)
+	if undoTracker != nil {
+		undoSweeper := &server.ButtonSweeper{Tracker: undoTracker, Telegram: tgClient, Sinks: sinks, Logger: logger, Interval: 30 * time.Second}
 		workers = append(workers, undoSweeper.Run)
 	}
 
@@ -396,9 +410,11 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 			withAM++
 		}
 	}
-	logger.Info("telegram updates enabled",
-		"chat_allowlist", len(cfg.Updates.ChatAllowlist),
-		"user_allowlist", len(cfg.Updates.UserAllowlist),
+	logger.Info("interactive updates enabled",
+		"telegram", telegramInteractive,
+		"slack", slackInteractive,
+		"telegram_chats", len(cfg.Updates.ChatAllowlist),
+		"slack_channels", len(cfg.Updates.Slack.ChannelAllowlist),
 		"durations", cfg.Updates.SilenceDurations,
 		"button_ttl", cfg.Updates.ButtonTTL,
 		"silence_matchers", cfg.Updates.SilenceMatchers,
@@ -407,6 +423,14 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, logger *slog.Logg
 		"clusters_with_alertmanager", withAM,
 	)
 	return keyboard, tracker, workers, nil
+}
+
+func int64sToStrings(in []int64) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = strconv.FormatInt(v, 10)
+	}
+	return out
 }
 
 func newLogger(cfg config.Logging) *slog.Logger {

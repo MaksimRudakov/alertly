@@ -153,9 +153,6 @@ func TestBuildClusters(t *testing.T) {
 	if tg := clusters["k8s-prod"].Destinations["default"][0]; tg.Chat != "-100" || tg.Thread != "7" {
 		t.Errorf("target: %+v", tg)
 	}
-	if pc := pipelineCluster(clusters); pc == nil || pc.Name != config.DefaultCluster {
-		t.Errorf("pipeline cluster: %+v", pc)
-	}
 
 	t.Setenv("TEST_TOKEN_EDGE", "p")
 	if _, _, err := buildClusters(cfg); err == nil || !strings.Contains(err.Error(), "own token") {

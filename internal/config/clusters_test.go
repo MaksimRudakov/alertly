@@ -206,3 +206,45 @@ func TestExamplesLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_UpdatesSlack(t *testing.T) {
+	base := func() Config {
+		c := Default()
+		c.Slack.Enabled = true
+		c.Updates.Enabled = true
+		c.Alertmanager.URL = "http://am:9093"
+		c.Updates.ChatAllowlist = []int64{-100}
+		c.Updates.Slack = UpdatesSlack{Enabled: true, ChannelAllowlist: []string{"C0123ABCD"}, Command: "/alertly"}
+		return c
+	}
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"valid", func(*Config) {}, ""},
+		{"slack-only interactivity", func(c *Config) { c.Telegram.Enabled = false; c.Updates.ChatAllowlist = nil }, ""},
+		{"needs slack sink", func(c *Config) { c.Slack.Enabled = false }, "requires slack.enabled"},
+		{"needs channels", func(c *Config) { c.Updates.Slack.ChannelAllowlist = nil }, "at least one channel"},
+		{"channel name", func(c *Config) { c.Updates.Slack.ChannelAllowlist = []string{"#alerts"} }, "channel ID"},
+		{"bad user", func(c *Config) { c.Updates.Slack.UserAllowlist = []string{"oncall"} }, "user ID"},
+		{"bad command", func(c *Config) { c.Updates.Slack.Command = "alertly" }, "/alertly"},
+		{"no interactive sink", func(c *Config) { c.Telegram.Enabled = false; c.Updates.Slack.Enabled = false }, "interactive messenger"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			tc.mutate(&c)
+			err := c.Validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("unexpected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
