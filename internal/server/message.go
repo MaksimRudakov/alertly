@@ -130,21 +130,16 @@ func (h *MessageHandler) HandleCommand(ctx context.Context, cmd Command, reply C
 	logger.Info("command handled")
 }
 
-// selectClusters picks the clusters a status reply covers: the one named in
-// the arguments (name or alias), else the clusters whose destinations lead
-// to this chat, else the default cluster. nil = single-cluster mode.
+// selectClusters picks the clusters a status reply covers. A chat sees only
+// the clusters whose destinations route to it (or the default cluster when
+// none do); an argument (name or alias) narrows that set to one cluster and
+// cannot reach beyond it — another cluster answers like an unknown one, so a
+// chat learns nothing about clusters it does not receive alerts from.
+// nil = single-cluster mode.
 func (h *MessageHandler) selectClusters(cmd Command) ([]*Cluster, bool) {
 	if h.deps.Clusters == nil {
 		// Single-cluster mode ignores arguments, as before clusters existed.
 		return nil, true
-	}
-	if len(cmd.Args) > 0 {
-		for _, c := range sortedClusters(h.deps.Clusters) {
-			if c.Name == cmd.Args[0] || c.Alias == cmd.Args[0] {
-				return []*Cluster{c}, true
-			}
-		}
-		return nil, false
 	}
 	var bound []*Cluster
 	for _, c := range sortedClusters(h.deps.Clusters) {
@@ -157,7 +152,15 @@ func (h *MessageHandler) selectClusters(cmd Command) ([]*Cluster, bool) {
 			bound = []*Cluster{d}
 		}
 	}
-	return bound, true
+	if len(cmd.Args) == 0 {
+		return bound, true
+	}
+	for _, c := range bound {
+		if c.Name == cmd.Args[0] || c.Alias == cmd.Args[0] {
+			return []*Cluster{c}, true
+		}
+	}
+	return nil, false
 }
 
 type telegramReplier struct {
