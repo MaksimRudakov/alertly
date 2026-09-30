@@ -12,6 +12,7 @@ func defaultFuncMap() template.FuncMap {
 	return template.FuncMap{
 		"severity_emoji":    SeverityEmoji,
 		"escape_html":       EscapeHTML,
+		"escape_slack":      EscapeSlack,
 		"truncate":          Truncate,
 		"join":              JoinStrings,
 		"humanize_duration": HumanizeDuration,
@@ -43,6 +44,14 @@ var htmlEscaper = strings.NewReplacer(
 func EscapeHTML(s string) string {
 	return htmlEscaper.Replace(s)
 }
+
+// EscapeSlack escapes the characters Slack mrkdwn treats as control
+// characters (&, <, >) so alert text cannot inject links or mentions.
+func EscapeSlack(s string) string {
+	return slackEscaper.Replace(s)
+}
+
+var slackEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
 func Truncate(s string, n int) string {
 	if n <= 0 {

@@ -177,3 +177,16 @@ func TestValidate_UpdatesWithClusterAM(t *testing.T) {
 		t.Fatalf("want alertmanager.url error, got %v", err)
 	}
 }
+
+func TestValidate_SlackTemplateNeedsDefault(t *testing.T) {
+	c := Default()
+	c.Slack.Enabled = true
+	c.Format.Slack = FormatTemplate
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "slack.default") {
+		t.Fatalf("want slack.default error, got %v", err)
+	}
+	c.Templates = map[string]string{"default": "x", "slack.default": "*{{ .Title }}*"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
