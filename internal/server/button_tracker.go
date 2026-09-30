@@ -4,9 +4,12 @@ import (
 	"container/list"
 	"context"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/MaksimRudakov/alertly/internal/config"
+	"github.com/MaksimRudakov/alertly/internal/sink"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 )
 
@@ -18,6 +21,7 @@ type buttonKey struct {
 
 type buttonEntry struct {
 	Key         buttonKey
+	Cluster     string
 	Fingerprint string
 	ExpiresAt   time.Time
 }
@@ -54,6 +58,26 @@ func NewButtonTracker(ttl time.Duration, maxEntries int) *ButtonTracker {
 // tracker is full the oldest entry is evicted (its keyboard stays on screen;
 // the sweeper never sees it, and a late click gets the strict expired path).
 func (t *ButtonTracker) Register(chatID, messageID int64, fingerprint string) {
+	t.RegisterFor(chatID, messageID, config.DefaultCluster, fingerprint)
+}
+
+// RegisterRef records a message delivered through a sink. Only Telegram
+// messages carry interactive buttons today; other sinks are ignored.
+func (t *ButtonTracker) RegisterRef(cluster string, ref sink.MessageRef, fingerprint string) {
+	if ref.Sink != sink.Telegram {
+		return
+	}
+	chatID, err1 := strconv.ParseInt(ref.Chat, 10, 64)
+	messageID, err2 := strconv.ParseInt(ref.ID, 10, 64)
+	if err1 != nil || err2 != nil {
+		return
+	}
+	t.RegisterFor(chatID, messageID, cluster, fingerprint)
+}
+
+// RegisterFor records a message of a given cluster whose keyboard should live
+// for TTL.
+func (t *ButtonTracker) RegisterFor(chatID, messageID int64, cluster, fingerprint string) {
 	if t == nil || messageID == 0 {
 		return
 	}
@@ -62,6 +86,7 @@ func (t *ButtonTracker) Register(chatID, messageID int64, fingerprint string) {
 	key := buttonKey{ChatID: chatID, MessageID: messageID}
 	if el, ok := t.entries[key]; ok {
 		entry := el.Value.(*buttonEntry)
+		entry.Cluster = cluster
 		entry.Fingerprint = fingerprint
 		entry.ExpiresAt = t.now().Add(t.ttl)
 		t.order.MoveToBack(el)
@@ -69,6 +94,7 @@ func (t *ButtonTracker) Register(chatID, messageID int64, fingerprint string) {
 	}
 	t.entries[key] = t.order.PushBack(&buttonEntry{
 		Key:         key,
+		Cluster:     cluster,
 		Fingerprint: fingerprint,
 		ExpiresAt:   t.now().Add(t.ttl),
 	})
@@ -101,20 +127,26 @@ func (t *ButtonTracker) Valid(chatID, messageID int64) bool {
 // recorded for a message still within its window. ok is false in the same
 // cases Valid reports false.
 func (t *ButtonTracker) Lookup(chatID, messageID int64) (fingerprint string, ok bool) {
+	_, fingerprint, ok = t.LookupEntry(chatID, messageID)
+	return fingerprint, ok
+}
+
+// LookupEntry is Lookup plus the cluster the message belongs to.
+func (t *ButtonTracker) LookupEntry(chatID, messageID int64) (cluster, fingerprint string, ok bool) {
 	if t == nil {
-		return "", false
+		return "", "", false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	el, found := t.entries[buttonKey{ChatID: chatID, MessageID: messageID}]
 	if !found {
-		return "", false
+		return "", "", false
 	}
 	entry := el.Value.(*buttonEntry)
 	if !t.now().Before(entry.ExpiresAt) {
-		return "", false
+		return "", "", false
 	}
-	return entry.Fingerprint, true
+	return entry.Cluster, entry.Fingerprint, true
 }
 
 // Consume removes an entry (typically called after a successful silence so the

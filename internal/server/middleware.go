@@ -152,6 +152,34 @@ func authMiddleware(token string) func(http.Handler) http.Handler {
 	}
 }
 
+// clusterAuthMiddleware checks the bearer token against the token of the
+// cluster named in the path. An unknown cluster answers exactly like a wrong
+// token so cluster names cannot be probed.
+func clusterAuthMiddleware(tokens map[string]string) func(http.Handler) http.Handler {
+	expected := make(map[string][]byte, len(tokens))
+	for name, tok := range tokens {
+		expected[name] = []byte(tok)
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := r.Header.Get("Authorization")
+			want, known := expected[r.PathValue("cluster")]
+			got := []byte(strings.TrimPrefix(h, bearerPrefix))
+			if !known {
+				// Compare against a dummy to keep timing independent of
+				// whether the cluster exists.
+				want = []byte("\x00unknown-cluster")
+			}
+			if !strings.HasPrefix(h, bearerPrefix) || subtle.ConstantTimeCompare(got, want) != 1 || !known {
+				metrics.AuthFailures.Inc()
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	status int

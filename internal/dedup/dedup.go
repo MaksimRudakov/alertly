@@ -1,5 +1,5 @@
 // Package dedup provides an in-memory TTL cache of recently delivered
-// notifications, keyed by (fingerprint, chat target, status). Purpose: when an
+// notifications, keyed by (cluster, fingerprint, target, status). Purpose: when an
 // upstream caller (Alertmanager) retries a webhook that alertly already
 // delivered to Telegram, suppress the second send. Cache is per-process; a pod
 // restart re-opens the dedup window — accepted trade-off.
@@ -7,7 +7,6 @@ package dedup
 
 import (
 	"context"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,23 +36,16 @@ func (c *Cache) TTL() time.Duration {
 }
 
 // Key builds a stable cache key out of immutable notification + target + status
-// components. Returns "" if fingerprint is empty (caller should skip dedup).
-func Key(fingerprint string, chatID int64, threadID *int, status string) string {
+// components. cluster and target (sink:chat[:thread]) keep identical
+// fingerprints from different clusters or messengers apart — Alertmanager
+// fingerprints are label hashes, so the same alert in two clusters without a
+// `cluster` external label shares one. Returns "" if fingerprint is empty
+// (caller should skip dedup).
+func Key(fingerprint, cluster, target, status string) string {
 	if fingerprint == "" {
 		return ""
 	}
-	var b strings.Builder
-	b.Grow(len(fingerprint) + len(status) + 32)
-	b.WriteString(fingerprint)
-	b.WriteByte('|')
-	b.WriteString(strconv.FormatInt(chatID, 10))
-	b.WriteByte('|')
-	if threadID != nil {
-		b.WriteString(strconv.Itoa(*threadID))
-	}
-	b.WriteByte('|')
-	b.WriteString(status)
-	return b.String()
+	return strings.Join([]string{cluster, fingerprint, target, status}, "|")
 }
 
 // Reserve atomically checks the key and, if not present within the TTL window,
