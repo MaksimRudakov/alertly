@@ -21,18 +21,12 @@ const (
 	fallbackTextLimit   = 300
 )
 
-// Severity colour bar of the attachment wrapping the blocks.
-const (
-	colorCritical = "#E01E5A"
-	colorWarning  = "#ECB22E"
-	colorInfo     = "#36C5F0"
-	colorResolved = "#2EB67D"
-)
-
 // partPayload is the Slack-specific part of a message carried in
-// sink.Part.Payload; channel and thread are added at send time.
+// sink.Part.Payload; channel and thread are added at send time. Blocks are
+// top-level (not inside a legacy attachment): Slack collapses attachments
+// behind "Show more" after a few lines, which hid the silence buttons.
 type partPayload struct {
-	Attachments []Attachment `json:"attachments"`
+	Blocks []json.RawMessage `json:"blocks"`
 }
 
 // EscapeMrkdwn escapes the three characters Slack's mrkdwn treats as control
@@ -43,22 +37,22 @@ func EscapeMrkdwn(s string) string {
 
 var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
-func severityColor(n notification.Notification) string {
-	if n.Status == "resolved" {
-		return colorResolved
-	}
-	switch strings.ToLower(strings.TrimSpace(n.Severity)) {
+// severityShortcode renders the severity emoji as a Slack shortcode: a
+// unicode emoji with a variation selector (ℹ️) can show as a blank box in a
+// plain_text header, shortcodes always render.
+func severityShortcode(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
 	case "critical", "crit", "fatal", "emergency":
-		return colorCritical
+		return ":fire:"
 	case "warning", "warn":
-		return colorWarning
+		return ":warning:"
 	default:
-		return colorInfo
+		return ":information_source:"
 	}
 }
 
-// fallbackText is what notifications and screen readers show: Slack uses the
-// top-level `text` when blocks cannot be displayed.
+// fallbackText is the top-level `text`: with blocks Slack does not display
+// it, but uses it for notifications and screen readers.
 func fallbackText(n notification.Notification) string {
 	return truncateRunes(tmpl.SeverityEmoji(n.Severity)+" "+n.Title+" — "+strings.Join(n.StatusLine(), " · "), fallbackTextLimit)
 }
@@ -70,7 +64,7 @@ func renderBuiltin(n notification.Notification, labels []string) []messagePart {
 	head := []json.RawMessage{
 		block(map[string]any{
 			"type": "header",
-			"text": map[string]any{"type": "plain_text", "text": truncateRunes(tmpl.SeverityEmoji(n.Severity)+" "+n.Title, headerTextLimit), "emoji": true},
+			"text": map[string]any{"type": "plain_text", "text": truncateRunes(severityShortcode(n.Severity)+" "+n.Title, headerTextLimit), "emoji": true},
 		}),
 		block(map[string]any{
 			"type":     "context",
@@ -118,15 +112,11 @@ type messagePart struct {
 // assemble packs head + body sections + tail into as few messages as the
 // block limit allows; head goes on the first message, tail on the last.
 func assemble(n notification.Notification, head, body, tail []json.RawMessage) []messagePart {
-	color := severityColor(n)
 	fallback := fallbackText(n)
 	var parts []messagePart
 	cur := append([]json.RawMessage(nil), head...)
 	flush := func() {
-		parts = append(parts, messagePart{
-			text:    fallback,
-			payload: partPayload{Attachments: []Attachment{{Color: color, Blocks: cur, Fallback: fallback}}},
-		})
+		parts = append(parts, messagePart{text: fallback, payload: partPayload{Blocks: cur}})
 		cur = nil
 	}
 	for _, b := range body {

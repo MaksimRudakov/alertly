@@ -168,7 +168,7 @@ func decodeParts(t *testing.T, parts []sink.Part) []partPayload {
 
 func blockTypes(pp partPayload) []string {
 	var types []string
-	for _, b := range pp.Attachments[0].Blocks {
+	for _, b := range pp.Blocks {
 		var v struct {
 			Type string `json:"type"`
 		}
@@ -190,15 +190,12 @@ func TestRenderBuiltin(t *testing.T) {
 		t.Fatalf("parts=%d err=%v", len(parts), err)
 	}
 	pp := decodeParts(t, parts)[0]
-	if pp.Attachments[0].Color != colorCritical {
-		t.Errorf("color: %s", pp.Attachments[0].Color)
-	}
 	if got := strings.Join(blockTypes(pp), ","); got != "header,context,section,section,context" {
 		t.Errorf("blocks: %s", got)
 	}
 	raw := string(parts[0].Payload)
 	for _, want := range []string{
-		`Disk \u003cfull\u003e \u0026 more`,          // header is plain_text: no escaping needed
+		`:fire: Disk \u003cfull\u003e \u0026 more`,   // header: shortcode emoji, plain_text needs no escaping
 		`Firing · cluster k8s-prod · critical`,       // status context
 		`used *95%* \u0026lt;@U123\u0026gt;`,         // mention neutralised
 		`*alertname*\n` + "`DiskFull`",               // key field
@@ -215,10 +212,10 @@ func TestRenderBuiltin(t *testing.T) {
 		t.Errorf("fallback text: %q", parts[0].Text)
 	}
 
-	n.Status = "resolved"
+	n.Status, n.Severity = "resolved", "info"
 	parts, _ = NewSink(nil, nil, true, nil).Render("x", n)
-	if decodeParts(t, parts)[0].Attachments[0].Color != colorResolved {
-		t.Error("resolved must be green")
+	if raw := string(parts[0].Payload); !strings.Contains(raw, ":information_source: ") || !strings.Contains(raw, "Resolved") {
+		t.Errorf("resolved info header/status: %s", raw)
 	}
 }
 
@@ -236,7 +233,7 @@ func TestRenderBuiltin_LongBodySplits(t *testing.T) {
 		if len(types) > 50 {
 			t.Errorf("part %d has %d blocks", i, len(types))
 		}
-		for _, b := range pp.Attachments[0].Blocks {
+		for _, b := range pp.Blocks {
 			var s struct {
 				Text struct {
 					Text string `json:"text"`
@@ -290,9 +287,14 @@ func TestSink_SendUsesPayload(t *testing.T) {
 	if err != nil || ref.ID != "1712345678.000100" || ref.Chat != "C0123ABCD" {
 		t.Fatalf("ref=%+v err=%v", ref, err)
 	}
-	att, _ := f.last["attachments"].([]any)
-	if len(att) != 1 || att[0].(map[string]any)["color"] != colorWarning || f.last["thread_ts"] != "9.9" {
-		t.Errorf("sent payload: %v", f.last)
+	blocks, _ := f.last["blocks"].([]any)
+	if len(blocks) == 0 || f.last["thread_ts"] != "9.9" || f.last["attachments"] != nil {
+		t.Errorf("content must go as top-level blocks (attachments collapse behind Show more): %v", f.last)
+	}
+	// With blocks, top-level text is not displayed; it is the notification
+	// fallback and must be present.
+	if txt, _ := f.last["text"].(string); !strings.Contains(txt, "T") {
+		t.Errorf("fallback text missing: %v", f.last["text"])
 	}
 }
 

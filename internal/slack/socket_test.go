@@ -173,7 +173,7 @@ func TestSink_ActionsAndSetActions(t *testing.T) {
 
 func TestOriginalPart_StripsActions(t *testing.T) {
 	msg, _ := message("C1", sink.Part{Text: "t", Payload: mustPayload(t)}, &sink.Actions{Rows: [][]sink.Button{{{Text: "b", Data: "d"}}}})
-	p := OriginalPart("t", msg.Attachments)
+	p := OriginalPart("t", msg.Blocks)
 	if strings.Contains(string(p.Payload), ActionsBlockID) || !strings.Contains(string(p.Payload), "header") {
 		t.Errorf("original part: %s", p.Payload)
 	}

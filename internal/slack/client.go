@@ -56,8 +56,10 @@ type CommandReply struct {
 
 // Message is a chat.postMessage request.
 type Message struct {
-	Channel     string            `json:"channel"`
-	Text        string            `json:"text"`
+	Channel string `json:"channel"`
+	// Text is the notification/screen-reader fallback; Slack does not
+	// display it when Blocks are present.
+	Text        string            `json:"text,omitempty"`
 	ThreadTS    string            `json:"thread_ts,omitempty"`
 	Blocks      []json.RawMessage `json:"blocks,omitempty"`
 	Attachments []Attachment      `json:"attachments,omitempty"`

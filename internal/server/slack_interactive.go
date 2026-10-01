@@ -67,10 +67,10 @@ type blockActionsPayload struct {
 		ID string `json:"id"`
 	} `json:"channel"`
 	Message struct {
-		TS          string             `json:"ts"`
-		ThreadTS    string             `json:"thread_ts"`
-		Text        string             `json:"text"`
-		Attachments []slack.Attachment `json:"attachments"`
+		TS       string            `json:"ts"`
+		ThreadTS string            `json:"thread_ts"`
+		Text     string            `json:"text"`
+		Blocks   []json.RawMessage `json:"blocks"`
 	} `json:"message"`
 	Actions []struct {
 		ActionID string `json:"action_id"`
@@ -105,7 +105,7 @@ func (s *SlackInteractive) interactive(ctx context.Context, raw json.RawMessage)
 		User:     Actor{ID: p.User.ID, Name: p.User.Username},
 		Message:  sink.MessageRef{Sink: sink.Slack, Chat: p.Channel.ID, ID: p.Message.TS},
 		Data:     value,
-		Original: slack.OriginalPart(p.Message.Text, p.Message.Attachments),
+		Original: slack.OriginalPart(p.Message.Text, p.Message.Blocks),
 	}
 	s.Callbacks.HandleInteraction(ctx, in, func(ctx context.Context, text string, _ bool) {
 		// Detached, like Telegram's answer: the user must learn the outcome
