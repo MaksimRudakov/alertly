@@ -1,0 +1,42 @@
+# Local Slack test stand: two Alertmanagers (clusters k8s-prod, k8s-data) and
+# alertly built from this checkout, talking to a real Slack workspace over
+# Socket Mode (outbound only — no public endpoint).
+#
+#   cp .env.example .env   # fill in tokens and channel IDs
+#   ./up.sh
+#
+# Webhook tokens below are local-only placeholders, not secrets.
+name: alertly-local-slack
+
+services:
+  alertly:
+    build:
+      context: ../..
+      args:
+        VERSION: local
+    env_file: .env
+    environment:
+      ALERTLY_CONFIG: /etc/alertly/config.yaml
+      WEBHOOK_AUTH_TOKEN_K8S_PROD: local-prod-token
+      WEBHOOK_AUTH_TOKEN_K8S_DATA: local-data-token
+    volumes:
+      - ./.rendered/alertly.yaml:/etc/alertly/config.yaml:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on: [am-prod, am-data]
+
+  am-prod:
+    image: quay.io/prometheus/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./alertmanager-prod.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "127.0.0.1:9093:9093"
+
+  am-data:
+    image: quay.io/prometheus/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./alertmanager-data.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "127.0.0.1:9094:9093"
