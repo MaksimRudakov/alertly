@@ -319,7 +319,7 @@ format:
 2. Invite the bot to each channel (`/invite @alertly`); otherwise sends fail with `not_in_channel`.
 3. Address channels by **ID** (`C…`, from the channel details), never by name — names change, IDs do not. Config validation rejects names.
 
-Delivery uses `chat.postMessage` with the same guarantees as Telegram: global + per-channel rate limit, retry of 429/5xx/network errors with `Retry-After`, deadline-aware backoff, dedup. The builtin layout is Block Kit: header, status context, body sections, label fields, links, a severity colour bar (resolved = green). A body longer than one message allows spills into continuation messages.
+Delivery uses `chat.postMessage` with the same guarantees as Telegram: global + per-channel rate limit, retry of 429/5xx/network errors with `Retry-After`, deadline-aware backoff, dedup. The builtin layout is Block Kit: header with a severity emoji (:fire: / :warning: / :information_source:), status context, body sections, label fields, links, and the buttons right below — top-level blocks rather than a coloured legacy attachment, which Slack collapses behind "Show more" (hiding the buttons). A body longer than one message allows spills into continuation messages.
 
 Each sink has its own readiness: the pod stays ready while **any** sink is, so a Slack outage does not take Telegram delivery down with it. Watch `alertly_sink_ready{sink}` for a single messenger being down.
 

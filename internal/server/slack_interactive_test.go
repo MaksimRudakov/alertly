@@ -116,7 +116,7 @@ func blockAction(channel, ts, value string) map[string]any {
 		"type":    "block_actions",
 		"user":    map[string]any{"id": "U0ONCALL01", "username": "oncall"},
 		"channel": map[string]any{"id": channel},
-		"message": map[string]any{"ts": ts, "text": "fallback", "attachments": []any{}},
+		"message": map[string]any{"ts": ts, "text": "fallback", "blocks": []any{}},
 		"actions": []any{map[string]any{"action_id": "alertly_0", "block_id": slack.ActionsBlockID, "value": value}},
 	}
 }
@@ -124,7 +124,7 @@ func blockAction(channel, ts, value string) map[string]any {
 func TestSlackInteractive_SilenceAndUndo(t *testing.T) {
 	e := newSlackEnv(t)
 	ref := sink.MessageRef{Sink: sink.Slack, Chat: "C0PROD0001", ID: "1712345678.000100"}
-	sent := sink.Part{Text: "fallback", Payload: json.RawMessage(`{"attachments":[{"blocks":[{"type":"header"}]}]}`)}
+	sent := sink.Part{Text: "fallback", Payload: json.RawMessage(`{"blocks":[{"type":"header"}]}`)}
 	e.tracker.RegisterRef("k8s-prod", ref, "fp1", sent)
 
 	e.si.dispatch(context.Background(), envelope(t, "interactive", blockAction("C0PROD0001", ref.ID, "s|prod|fp1|1h")))

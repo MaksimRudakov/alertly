@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/notification"
 	"github.com/MaksimRudakov/alertly/internal/sink"
 	tmpl "github.com/MaksimRudakov/alertly/internal/template"
@@ -46,6 +47,9 @@ func (s *Sink) Render(templateName string, n notification.Notification) ([]sink.
 			return nil, &sink.RenderError{Template: name, Err: err}
 		}
 		parts = renderTemplate(n, text)
+	}
+	if len(parts) > 1 {
+		metrics.MessageSplitTotal.Inc()
 	}
 	out := make([]sink.Part, 0, len(parts))
 	for _, p := range parts {
@@ -92,14 +96,10 @@ func message(channel string, p sink.Part, actions *sink.Actions) (Message, error
 		if err := json.Unmarshal(p.Payload, &pp); err != nil {
 			return Message{}, fmt.Errorf("slack payload: %w", err)
 		}
-		msg.Attachments = pp.Attachments
+		msg.Blocks = append([]json.RawMessage(nil), pp.Blocks...)
 	}
 	if block := actionsBlock(actions); block != nil {
-		if len(msg.Attachments) == 0 {
-			msg.Attachments = []Attachment{{}}
-		}
-		last := &msg.Attachments[len(msg.Attachments)-1]
-		last.Blocks = append(append([]json.RawMessage(nil), last.Blocks...), block)
+		msg.Blocks = append(msg.Blocks, block)
 	}
 	return msg, nil
 }
@@ -153,22 +153,17 @@ func (s *Sink) Classify(err error) sink.ErrorClass {
 // OriginalPart rebuilds a sink.Part from a message as Slack reports it in an
 // interaction payload, minus alertly's actions block — what SetActions needs
 // when the tracker no longer holds the message as sent.
-func OriginalPart(text string, attachments []Attachment) sink.Part {
-	clean := make([]Attachment, 0, len(attachments))
-	for _, a := range attachments {
-		kept := a.Blocks[:0:0]
-		for _, b := range a.Blocks {
-			var meta struct {
-				BlockID string `json:"block_id"`
-			}
-			if json.Unmarshal(b, &meta) == nil && meta.BlockID == ActionsBlockID {
-				continue
-			}
-			kept = append(kept, b)
+func OriginalPart(text string, blocks []json.RawMessage) sink.Part {
+	kept := make([]json.RawMessage, 0, len(blocks))
+	for _, b := range blocks {
+		var meta struct {
+			BlockID string `json:"block_id"`
 		}
-		a.Blocks = kept
-		clean = append(clean, a)
+		if json.Unmarshal(b, &meta) == nil && meta.BlockID == ActionsBlockID {
+			continue
+		}
+		kept = append(kept, b)
 	}
-	payload, _ := json.Marshal(partPayload{Attachments: clean})
+	payload, _ := json.Marshal(partPayload{Blocks: kept})
 	return sink.Part{Text: text, Payload: payload}
 }
