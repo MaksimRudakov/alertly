@@ -195,12 +195,19 @@ func (d webhookDeps) deliverSink(ctx context.Context, logger *slog.Logger, clust
 				st.deadlineHit = true
 				return
 			}
-			d.deliverTarget(ctx, logger, cluster, s, target, n, parts, st)
+			if !d.deliverTarget(ctx, logger, cluster, s, target, n, parts, st) {
+				st.deadlineHit = true
+				return
+			}
 		}
 	}
 }
 
-func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, cluster *Cluster, s sink.Sink, target sink.Target, n notification.Notification, parts []sink.Part, st *sinkStats) {
+// deliverTarget sends all parts of one notification to one target. It
+// returns false when the request budget ran out (the sink must stop: further
+// sends would only fail the same way and the caller's retry will deliver
+// them, deduped).
+func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, cluster *Cluster, s sink.Sink, target sink.Target, n notification.Notification, parts []sink.Part, st *sinkStats) bool {
 	dedupKey := dedup.Key(n.Fingerprint, cluster.Name, target.String(), n.Status)
 	if d.dedup.Reserve(dedupKey) {
 		metrics.DedupSkipped.WithLabelValues(d.source.Name(), target.Chat, n.Status, cluster.Name, target.Sink).Inc()
@@ -209,7 +216,7 @@ func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, clu
 			"fingerprint", n.Fingerprint,
 			"status", n.Status,
 		)
-		return
+		return true
 	}
 
 	sentAny, failed := false, false
@@ -223,6 +230,15 @@ func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, clu
 			actions = d.keyboard.Build(cluster, target, n, d.source.Name())
 		}
 		ref, err := d.send(ctx, s, target, part, actions)
+		if err != nil && s.Classify(err) == sink.ErrCanceled {
+			// Budget exhausted (deadline or the limiter refusing to wait past
+			// it): not an attempt the messenger saw, not an error to count.
+			st.Attempts--
+			if !sentAny {
+				d.dedup.Forget(dedupKey)
+			}
+			return false
+		}
 		if err != nil {
 			st.Errors++
 			failed = true
@@ -246,6 +262,7 @@ func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, clu
 	if !sentAny && failed {
 		d.dedup.Forget(dedupKey)
 	}
+	return true
 }
 
 func (d webhookDeps) send(ctx context.Context, s sink.Sink, t sink.Target, p sink.Part, actions *sink.Actions) (sink.MessageRef, error) {

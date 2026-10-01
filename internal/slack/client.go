@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/MaksimRudakov/alertly/internal/metrics"
+	"github.com/MaksimRudakov/alertly/internal/sink"
 )
 
 type Config struct {
@@ -150,7 +151,7 @@ func (c *client) PostMessage(ctx context.Context, msg Message) (string, error) {
 		wait = func(ctx context.Context) error {
 			waited, err := c.limiter.Wait(ctx, msg.Channel)
 			if err != nil {
-				return fmt.Errorf("rate limiter wait: %w", err)
+				return sink.LimiterError(err)
 			}
 			if waited > 50*time.Millisecond {
 				metrics.SlackRateLimited.WithLabelValues(msg.Channel).Inc()
@@ -247,7 +248,7 @@ func (c *client) globalWait() func(context.Context) error {
 	}
 	return func(ctx context.Context) error {
 		if err := c.limiter.WaitGlobal(ctx); err != nil {
-			return fmt.Errorf("rate limiter wait: %w", err)
+			return sink.LimiterError(err)
 		}
 		return nil
 	}
