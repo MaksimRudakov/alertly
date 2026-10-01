@@ -34,6 +34,11 @@ type SocketConfig struct {
 	// QueueSize bounds envelopes waiting for the handler; beyond it new ones
 	// are dropped (already acked) with a warning.
 	QueueSize int
+	// PingInterval/PingTimeout detect a half-open connection: a silently
+	// dropped network leaves the read blocked forever, so alertly pings and
+	// reconnects when no pong arrives. Defaults 30s / 10s.
+	PingInterval time.Duration
+	PingTimeout  time.Duration
 }
 
 // Socket keeps one Socket Mode connection alive and hands envelopes to a
@@ -49,6 +54,12 @@ type Socket struct {
 func NewSocket(cfg SocketConfig) *Socket {
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = 64
+	}
+	if cfg.PingInterval <= 0 {
+		cfg.PingInterval = 30 * time.Second
+	}
+	if cfg.PingTimeout <= 0 {
+		cfg.PingTimeout = 10 * time.Second
 	}
 	return &Socket{cfg: cfg, http: &http.Client{Timeout: 10 * time.Second}}
 }
@@ -149,12 +160,43 @@ func (s *Socket) serve(ctx context.Context, wsURL string, queue chan<- Envelope,
 	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(1 << 20)
 
+	// Liveness: the pong is consumed by the Read below; a missing pong means
+	// the peer is gone even though no FIN/RST arrived.
+	connCtx, stopPing := context.WithCancel(ctx)
+	defer stopPing()
+	pingFailed := make(chan struct{})
+	go func() {
+		t := time.NewTicker(s.cfg.PingInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-connCtx.Done():
+				return
+			case <-t.C:
+				pctx, cancel := context.WithTimeout(connCtx, s.cfg.PingTimeout)
+				err := conn.Ping(pctx)
+				cancel()
+				if err != nil && connCtx.Err() == nil {
+					close(pingFailed)
+					_ = conn.CloseNow()
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				_ = conn.Close(websocket.StatusNormalClosure, "shutdown")
 				return "shutdown"
+			}
+			select {
+			case <-pingFailed:
+				log.Warn("slack socket: no pong, connection presumed dead", "timeout", s.cfg.PingTimeout)
+				return "ping_timeout"
+			default:
 			}
 			log.Warn("slack socket: read failed", "err", err)
 			return "error"

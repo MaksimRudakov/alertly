@@ -210,3 +210,43 @@ func TestRespond_OnlySlackHosts(t *testing.T) {
 		t.Errorf("reply body: %v", got)
 	}
 }
+
+// A silently dropped network leaves the read blocked with no FIN/RST: the
+// ping must notice the missing pong and reconnect.
+func TestSocket_ReconnectsWhenPongsStop(t *testing.T) {
+	f := newFakeSocketMode(t, func(ctx context.Context, conn *websocket.Conn, n int32) {
+		_ = writeJSON(ctx, conn, map[string]any{"type": "hello"})
+		<-ctx.Done() // never read again: pings go unanswered
+	})
+	s := NewSocket(SocketConfig{APIURL: f.srv.URL, AppToken: "xapp", Logger: discard,
+		PingInterval: 100 * time.Millisecond, PingTimeout: 200 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx, func(context.Context, Envelope) {}); close(done) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for f.opens.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if f.opens.Load() < 2 {
+		t.Fatalf("dead connection not detected: opens=%d", f.opens.Load())
+	}
+}
+
+// A healthy peer answers pings; the connection must stay up.
+func TestSocket_KeepsConnectionWhilePongsArrive(t *testing.T) {
+	f := newFakeSocketMode(t, func(ctx context.Context, conn *websocket.Conn, n int32) {
+		_ = writeJSON(ctx, conn, map[string]any{"type": "hello"})
+		_, _, _ = conn.Read(ctx) // reading answers pings
+	})
+	s := NewSocket(SocketConfig{APIURL: f.srv.URL, AppToken: "xapp", Logger: discard,
+		PingInterval: 50 * time.Millisecond, PingTimeout: 500 * time.Millisecond})
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	s.Run(ctx, func(context.Context, Envelope) {})
+	if n := f.opens.Load(); n != 1 {
+		t.Errorf("healthy connection must not be recycled: opens=%d", n)
+	}
+}
