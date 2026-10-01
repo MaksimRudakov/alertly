@@ -1,0 +1,55 @@
+# Rendered by up.sh (envsubst) into .rendered/alertly.yaml.
+server:
+  listen_addr: ":8080"
+
+telegram:
+  enabled: false        # Slack only: a shared Telegram bot would clash with other pollers (409)
+
+slack:
+  enabled: true         # SLACK_BOT_TOKEN
+  channel_allowlist: [${SLACK_CHANNEL_PROD}, ${SLACK_CHANNEL_DATA}]
+
+format:
+  slack: builtin
+  labels: [alertname, namespace, instance]
+
+logging:
+  level: debug
+  format: text
+
+clusters:
+  k8s-prod:
+    alias: prod
+    auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_PROD
+    watchdog_alert: ""
+    alertmanager:
+      url: http://am-prod:9093
+    destinations:
+      default:
+        - slack: "${SLACK_CHANNEL_PROD}"
+  k8s-data:
+    alias: data
+    auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_DATA
+    watchdog_alert: ""
+    alertmanager:
+      url: http://am-data:9093
+    destinations:
+      default:
+        - slack: "${SLACK_CHANNEL_DATA}"
+
+updates:
+  enabled: true
+  silence_durations: ["1h", "4h", "24h"]
+  button_ttl: 2h
+  undo_window: 5m
+  commands:
+    enabled: true
+  slack:
+    enabled: true       # SLACK_APP_TOKEN
+    channel_allowlist: [${SLACK_CHANNEL_PROD}, ${SLACK_CHANNEL_DATA}]
+    user_allowlist: [${SLACK_USER_ALLOWLIST}]
+    command: /alertly
+
+dedup:
+  enabled: true
+  ttl: 1h
