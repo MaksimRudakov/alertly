@@ -346,3 +346,43 @@ func TestCallback_NamedClusterUsesItsAlertmanager(t *testing.T) {
 		t.Errorf("unknown alias answer: %+v", last)
 	}
 }
+
+// A burst larger than the request budget makes the rate limiter refuse to
+// wait past the deadline. That is alertly's own budget, not a messenger
+// failure: readiness must stay up, the sink stops for this request, and the
+// response is a partial 207 for the caller to retry (deduped).
+func TestBudgetExhaustionIsNotAServerError(t *testing.T) {
+	e := newClusterEnv(t, dedup.New(time.Hour))
+	e.slack.fail = sink.LimiterError(errors.New("rate: Wait(n=1) would exceed context deadline"))
+
+	var alerts []string
+	for i := 0; i < readyzFailureWindow+5; i++ {
+		alerts = append(alerts, `{"status":"firing","fingerprint":"fp-`+strconv.Itoa(i)+`","labels":{"alertname":"X"}}`)
+	}
+	resp, body := e.post(t, "/v1/clusters/k8s-data/alertmanager/default", "tok-data", `{"alerts":[`+strings.Join(alerts, ",")+`]}`)
+	if resp.StatusCode != http.StatusMultiStatus {
+		t.Fatalf("status %d, want 207: %s", resp.StatusCode, body)
+	}
+	if ok, reason := e.slReady.IsReady(); !ok {
+		t.Fatalf("budget exhaustion must not flip readiness: %s", reason)
+	}
+	if got := len(e.slack.Sent()); got != 1 {
+		t.Errorf("slack must stop after the first budget refusal, got %d attempts", got)
+	}
+	if !strings.Contains(body, `"slack":{"attempts":0,"errors":0}`) {
+		t.Errorf("refused sends are neither attempts nor errors: %s", body)
+	}
+	if got := len(e.tg.Sent()); got != readyzFailureWindow+5 {
+		t.Errorf("telegram must be unaffected, got %d", got)
+	}
+}
+
+func TestLimiterErrorClassifiesAsCanceled(t *testing.T) {
+	err := sink.LimiterError(errors.New("rate: Wait(n=1) would exceed context deadline"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("limiter refusal must wrap context.DeadlineExceeded: %v", err)
+	}
+	if (&recordingSink{}).Classify(err) != sink.ErrCanceled {
+		t.Error("must classify as budget (canceled)")
+	}
+}

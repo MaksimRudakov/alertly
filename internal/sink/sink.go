@@ -7,6 +7,7 @@ package sink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/MaksimRudakov/alertly/internal/notification"
@@ -90,6 +91,18 @@ type Sink interface {
 	// Probe checks credentials and reachability (getMe / auth.test).
 	Probe(ctx context.Context) error
 	Classify(err error) ErrorClass
+}
+
+// LimiterError wraps a failed rate-limiter wait. rate.Limiter refuses a wait
+// that cannot finish before the context deadline with its own error (not
+// context.DeadlineExceeded), so without this a burst larger than the request
+// budget looked like a run of server failures and flipped the sink unready —
+// exactly during an alert storm. It is our own request budget running out.
+func LimiterError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("rate limiter wait: %w", err)
+	}
+	return fmt.Errorf("rate limiter wait: %w (%w)", context.DeadlineExceeded, err)
 }
 
 // RenderError marks a formatting failure so the handler can meter it

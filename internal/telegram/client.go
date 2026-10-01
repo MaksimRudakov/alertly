@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/MaksimRudakov/alertly/internal/metrics"
+	"github.com/MaksimRudakov/alertly/internal/sink"
 )
 
 type Client interface {
@@ -156,7 +157,7 @@ func (c *client) chatWait(chatID int64) func(context.Context) error {
 	return func(ctx context.Context) error {
 		waited, err := c.limiter.Wait(ctx, chatID)
 		if err != nil {
-			return fmt.Errorf("rate limiter wait: %w", err)
+			return sink.LimiterError(err)
 		}
 		if waited > 50*time.Millisecond {
 			metrics.TelegramRateLimited.WithLabelValues(metrics.ChatLabel(chatID)).Inc()
@@ -173,7 +174,7 @@ func (c *client) globalWait() func(context.Context) error {
 	}
 	return func(ctx context.Context) error {
 		if err := c.limiter.WaitGlobal(ctx); err != nil {
-			return fmt.Errorf("rate limiter wait: %w", err)
+			return sink.LimiterError(err)
 		}
 		return nil
 	}

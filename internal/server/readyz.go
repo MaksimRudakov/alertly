@@ -82,7 +82,7 @@ func (r *readiness) RecordSendFailure(serverError bool) {
 	r.consecFails++
 	if r.consecFails >= readyzFailureWindow {
 		r.ready = false
-		r.reason = "telegram api: too many consecutive 5xx errors"
+		r.reason = "too many consecutive server errors from the messenger API"
 	}
 }
 
