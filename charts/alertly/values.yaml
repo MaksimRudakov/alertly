@@ -58,7 +58,12 @@ securityContext:
     drop:
       - ALL
 
-# -- CPU/memory requests and limits.
+# -- CPU/memory requests and limits. With a memory limit set the chart also
+# sets GOMEMLIMIT to it (Go GC soft limit) unless `env.GOMEMLIMIT` is given.
+# Sizing: ~15 MiB base plus ~4 KiB per message with live Slack buttons (the
+# message body is kept for chat.update) — 10000 such messages
+# (`config.updates.button_tracker_max`) measured at ~55 MiB RSS. Telegram
+# buttons cost far less. Raise the limit if you raise button_tracker_max.
 resources:
   requests:
     cpu: 10m

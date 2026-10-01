@@ -57,6 +57,15 @@ spec:
           env:
             - name: ALERTLY_CONFIG
               value: /etc/alertly/config.yaml
+            {{- if and .Values.resources .Values.resources.limits .Values.resources.limits.memory (not (hasKey .Values.env "GOMEMLIMIT")) }}
+            # Go GC soft limit = the container memory limit, so the heap is
+            # collected harder before the kernel OOM-kills the pod.
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: alertly
+                  resource: limits.memory
+            {{- end }}
             {{- range $k, $v := .Values.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}
