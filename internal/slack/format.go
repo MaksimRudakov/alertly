@@ -68,7 +68,7 @@ func renderBuiltin(n notification.Notification, labels []string) []messagePart {
 		}),
 		block(map[string]any{
 			"type":     "context",
-			"elements": []any{map[string]any{"type": "mrkdwn", "text": EscapeMrkdwn(strings.Join(n.StatusLine(), " · "))}},
+			"elements": []any{mrkdwn(EscapeMrkdwn(strings.Join(n.StatusLine(), " · ")))},
 		}),
 	}
 
@@ -76,10 +76,7 @@ func renderBuiltin(n notification.Notification, labels []string) []messagePart {
 	var fields []any
 	for _, key := range labels {
 		if v := n.Labels[key]; v != "" && len(fields) < maxFields {
-			fields = append(fields, map[string]any{
-				"type": "mrkdwn",
-				"text": truncateRunes("*"+EscapeMrkdwn(key)+"*\n`"+EscapeMrkdwn(v)+"`", fieldTextLimit),
-			})
+			fields = append(fields, mrkdwn(truncateRunes("*"+EscapeMrkdwn(key)+"*\n`"+EscapeMrkdwn(v)+"`", fieldTextLimit)))
 		}
 	}
 	if len(fields) > 0 {
@@ -92,7 +89,7 @@ func renderBuiltin(n notification.Notification, labels []string) []messagePart {
 	if len(links) > 0 {
 		tail = append(tail, block(map[string]any{
 			"type":     "context",
-			"elements": []any{map[string]any{"type": "mrkdwn", "text": truncateRunes(strings.Join(links, " · "), sectionTextLimit)}},
+			"elements": []any{mrkdwn(truncateRunes(strings.Join(links, " · "), sectionTextLimit))},
 		}))
 	}
 
@@ -143,10 +140,18 @@ func sections(text string) []json.RawMessage {
 	for _, chunk := range splitText(text, sectionTextLimit) {
 		out = append(out, block(map[string]any{
 			"type": "section",
-			"text": map[string]any{"type": "mrkdwn", "text": chunk},
+			"text": mrkdwn(chunk),
 		}))
 	}
 	return out
+}
+
+// mrkdwn builds a text object with verbatim set: by default Slack
+// auto-parses plain "@channel"/"@here" in mrkdwn into real mentions, so an
+// alert description could ping a whole channel. Explicit <!here> syntax in
+// operator templates still works; builtin escapes '<' and cannot produce it.
+func mrkdwn(text string) map[string]any {
+	return map[string]any{"type": "mrkdwn", "text": text, "verbatim": true}
 }
 
 func block(v map[string]any) json.RawMessage {

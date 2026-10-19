@@ -310,3 +310,55 @@ func TestSplitText(t *testing.T) {
 		}
 	}
 }
+
+// Slack auto-parses plain "@channel"/"@here" in mrkdwn unless verbatim is
+// set, so alert text could ping a whole channel.
+func TestRender_MrkdwnIsVerbatim(t *testing.T) {
+	n := notification.Notification{
+		Title: "T", Body: "ping @channel and @here", Status: "firing", Severity: "warning",
+		Labels: map[string]string{"namespace": "@everyone"},
+		Links:  []notification.Link{{Title: "@here", URL: "https://example.com"}},
+	}
+	for _, builtin := range []bool{true, false} {
+		s := NewSink(nil, fakeRenderer{text: "@channel from template"}, builtin, []string{"namespace"})
+		parts, err := s.Render("x", n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var objs int
+		var walk func(v any)
+		walk = func(v any) {
+			switch x := v.(type) {
+			case map[string]any:
+				if x["type"] == "mrkdwn" {
+					objs++
+					if x["verbatim"] != true {
+						t.Errorf("builtin=%v: mrkdwn without verbatim: %v", builtin, x)
+					}
+				}
+				for _, c := range x {
+					walk(c)
+				}
+			case []any:
+				for _, c := range x {
+					walk(c)
+				}
+			}
+		}
+		for _, p := range parts {
+			var v any
+			if err := json.Unmarshal(p.Payload, &v); err != nil {
+				t.Fatal(err)
+			}
+			walk(v)
+		}
+		if objs == 0 {
+			t.Errorf("builtin=%v: no mrkdwn objects rendered", builtin)
+		}
+	}
+}
+
+type fakeRenderer struct{ text string }
+
+func (f fakeRenderer) Render(string, notification.Notification) (string, error) { return f.text, nil }
+func (f fakeRenderer) Has(string) bool                                          { return true }
