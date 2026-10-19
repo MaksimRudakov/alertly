@@ -8,23 +8,24 @@ import (
 )
 
 func TestKey(t *testing.T) {
-	thread := 42
 	tests := []struct {
-		name string
-		fp   string
-		chat int64
-		thr  *int
-		st   string
-		want string
+		name    string
+		fp      string
+		cluster string
+		target  string
+		st      string
+		want    string
 	}{
-		{"basic", "fp1", -1001, nil, "firing", "fp1|-1001||firing"},
-		{"with_thread", "fp1", -1001, &thread, "firing", "fp1|-1001|42|firing"},
-		{"resolved", "fp1", -1001, nil, "resolved", "fp1|-1001||resolved"},
-		{"empty_fingerprint", "", -1001, nil, "firing", ""},
+		{"basic", "fp1", "default", "telegram:-1001", "firing", "default|fp1|telegram:-1001|firing"},
+		{"with_thread", "fp1", "default", "telegram:-1001:42", "firing", "default|fp1|telegram:-1001:42|firing"},
+		{"resolved", "fp1", "default", "telegram:-1001", "resolved", "default|fp1|telegram:-1001|resolved"},
+		{"other_cluster", "fp1", "prod", "telegram:-1001", "firing", "prod|fp1|telegram:-1001|firing"},
+		{"slack", "fp1", "prod", "slack:C0123ABCD", "firing", "prod|fp1|slack:C0123ABCD|firing"},
+		{"empty_fingerprint", "", "default", "telegram:-1001", "firing", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Key(tt.fp, tt.chat, tt.thr, tt.st); got != tt.want {
+			if got := Key(tt.fp, tt.cluster, tt.target, tt.st); got != tt.want {
 				t.Errorf("Key=%q want=%q", got, tt.want)
 			}
 		})

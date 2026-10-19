@@ -1,5 +1,5 @@
 {{- if and (gt (int .Values.replicaCount) 1) .Values.config.updates.enabled -}}
-{{- fail "config.updates.enabled=true requires replicaCount: 1 — Telegram allows a single getUpdates consumer per bot token (a second replica gets 409 Conflict and silence buttons/commands break), and button state is in-memory per pod." -}}
+{{- fail "config.updates.enabled=true requires replicaCount: 1 — Telegram allows a single getUpdates consumer per bot token (a second replica gets 409 Conflict), Slack Socket Mode spreads events across connections, and button state is in-memory per pod." -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -57,6 +57,15 @@ spec:
           env:
             - name: ALERTLY_CONFIG
               value: /etc/alertly/config.yaml
+            {{- if and .Values.resources .Values.resources.limits .Values.resources.limits.memory (not (hasKey .Values.env "GOMEMLIMIT")) }}
+            # Go GC soft limit = the container memory limit, so the heap is
+            # collected harder before the kernel OOM-kills the pod.
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: alertly
+                  resource: limits.memory
+            {{- end }}
             {{- range $k, $v := .Values.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}

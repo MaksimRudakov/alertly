@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -397,31 +395,6 @@ func TestE2EParseErrorReturns400(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
-	}
-}
-
-// TestIsServerError — unit-test the helper that drives readiness.
-func TestIsServerError(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil error returns false", nil, false},
-		{"canceled context returns false", context.Canceled, false},
-		{"deadline exceeded returns false", fmt.Errorf("send: %w", context.DeadlineExceeded), false},
-		{"network error returns true", errors.New("dial tcp: connection refused"), true},
-		{"api 400 returns false", &telegram.APIError{StatusCode: 400}, false},
-		{"api 429 returns false", &telegram.APIError{StatusCode: 429}, false},
-		{"api 500 returns true", &telegram.APIError{StatusCode: 500}, true},
-		{"api 503 returns true", &telegram.APIError{StatusCode: 503}, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := isServerError(c.err); got != c.want {
-				t.Errorf("got %v want %v", got, c.want)
-			}
-		})
 	}
 }
 

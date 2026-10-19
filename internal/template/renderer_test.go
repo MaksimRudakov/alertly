@@ -85,6 +85,12 @@ func TestEscapeHTML(t *testing.T) {
 	}
 }
 
+func TestEscapeSlack(t *testing.T) {
+	if got := EscapeSlack("<@U1> & <!here>"); got != "&lt;@U1&gt; &amp; &lt;!here&gt;" {
+		t.Errorf("escape_slack: %q", got)
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	if got := Truncate("hello", 10); got != "hello" {
 		t.Errorf("no-trunc: %q", got)

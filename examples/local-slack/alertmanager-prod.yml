@@ -1,0 +1,16 @@
+# Alertmanager of cluster k8s-prod: every alert goes to alertly, destination "default".
+route:
+  receiver: alertly
+  group_by: [alertname]
+  group_wait: 5s
+  group_interval: 30s
+  repeat_interval: 4h
+receivers:
+  - name: alertly
+    webhook_configs:
+      - url: http://alertly:8080/v1/clusters/k8s-prod/alertmanager/default
+        send_resolved: true
+        max_alerts: 100
+        http_config:
+          authorization:
+            credentials: local-prod-token

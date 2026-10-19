@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/MaksimRudakov/alertly/internal/alertmanager"
+	"github.com/MaksimRudakov/alertly/internal/sink"
 	"github.com/MaksimRudakov/alertly/internal/telegram"
 )
 
@@ -252,5 +253,45 @@ func TestStatusNeverSeenActivity(t *testing.T) {
 	text := pipelineReporter(am).Text(context.Background())
 	if !strings.Contains(text, "Last webhook: none since start") || !strings.Contains(text, "Last delivery: none since start") {
 		t.Errorf("expected never-seen activity lines in:\n%s", text)
+	}
+}
+
+func TestMessageHandler_MultiClusterStatus(t *testing.T) {
+	tg := &fakeTG{}
+	prod := &Cluster{Name: "k8s-prod", Alias: "prod", AM: &fakeAM{statusInfo: alertmanager.StatusInfo{Version: "0.28.1"}},
+		Destinations: map[string][]sink.Target{"default": {{Sink: sink.Telegram, Chat: "-100", Thread: "7"}}}}
+	data := &Cluster{Name: "k8s-data", Alias: "data", AM: &fakeAM{statusErr: errors.New("dial tcp: refused")},
+		Destinations: map[string][]sink.Target{"default": {{Sink: sink.Telegram, Chat: "-200"}}}}
+	status := newStatusReporter()
+	status.Pipeline = PipelineConfig{Enabled: true, Timeout: time.Second}
+	h := NewMessageHandler(CommandDeps{
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Telegram:      tg,
+		ChatAllowlist: []int64{-100, -200},
+		Status:        status,
+		Clusters:      map[string]*Cluster{"k8s-prod": prod, "k8s-data": data},
+	})
+
+	h.Handle(context.Background(), statusMsg(-100, 1))
+	got := tg.sentMessages[len(tg.sentMessages)-1].Text
+	if !strings.Contains(got, "<b>Pipeline — k8s-prod</b>") || strings.Contains(got, "k8s-data") {
+		t.Fatalf("chat -100 is routed from k8s-prod only:\n%s", got)
+	}
+
+	msg := statusMsg(-200, 1)
+	msg.Text = "/status data"
+	h.Handle(context.Background(), msg)
+	got = tg.sentMessages[len(tg.sentMessages)-1].Text
+	if !strings.Contains(got, "<b>Pipeline — k8s-data</b>") || !strings.Contains(got, "Alertmanager: ❌ unreachable") {
+		t.Errorf("explicit cluster by alias:\n%s", got)
+	}
+
+	// -100 receives only k8s-prod alerts: asking it about k8s-data is refused.
+	msg = statusMsg(-100, 1)
+	msg.Text = "/status k8s-data"
+	h.Handle(context.Background(), msg)
+	got = tg.sentMessages[len(tg.sentMessages)-1].Text
+	if !strings.Contains(got, "Unknown cluster") || strings.Contains(got, "Pipeline") {
+		t.Errorf("cluster not routed to this chat must look unknown:\n%s", got)
 	}
 }

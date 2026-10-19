@@ -58,7 +58,12 @@ securityContext:
     drop:
       - ALL
 
-# -- CPU/memory requests and limits.
+# -- CPU/memory requests and limits. With a memory limit set the chart also
+# sets GOMEMLIMIT to it (Go GC soft limit) unless `env.GOMEMLIMIT` is given.
+# Sizing: ~15 MiB base plus ~4 KiB per message with live Slack buttons (the
+# message body is kept for chat.update) — 10000 such messages
+# (`config.updates.button_tracker_max`) measured at ~55 MiB RSS. Telegram
+# buttons cost far less. Raise the limit if you raise button_tracker_max.
 resources:
   requests:
     cpu: 10m
@@ -124,13 +129,24 @@ secret:
     alertmanagerUsername: ALERTMANAGER_AUTH_USERNAME
     alertmanagerPassword: ALERTMANAGER_AUTH_PASSWORD
     alertmanagerToken: ALERTMANAGER_AUTH_TOKEN
-  # -- Token values used only when `create: true`. Alertmanager fields are optional.
+    slackBotToken: SLACK_BOT_TOKEN
+    slackAppToken: SLACK_APP_TOKEN
+  # -- Token values used only when `create: true`. `telegramBotToken` is required
+  # while `config.telegram.enabled`, `slackBotToken` while `config.slack.enabled`,
+  # `webhookAuthToken` unless `config.clusters` is set. Alertmanager fields are optional.
   values:
     telegramBotToken: ""
     webhookAuthToken: ""
     alertmanagerUsername: ""
     alertmanagerPassword: ""
     alertmanagerToken: ""
+    slackBotToken: ""
+    # -- Slack app-level token (xapp-, scope connections:write), required while `config.updates.slack.enabled`.
+    slackAppToken: ""
+    # -- Extra Secret keys (env var name -> value), e.g. per-cluster webhook
+    # tokens (`auth_token_env`) and per-cluster Alertmanager credentials
+    # (`<auth_env_prefix>_TOKEN`).
+    extra: {}
 
 # -- Env vars passed to the container. Keys become env names, values are quoted as strings.
 env:
@@ -203,6 +219,8 @@ config:
     idle_timeout: 120s
     read_header_timeout: 5s
   telegram:
+    # Set false for a Slack-only installation.
+    enabled: true
     api_url: "https://api.telegram.org"
     parse_mode: "HTML"
     request_timeout: 10s
@@ -240,6 +258,50 @@ config:
   logging:
     level: "info"
     format: "json"
+
+  # -- Slack sink (bot token from SLACK_BOT_TOKEN, scope chat:write; invite
+  # the bot to every channel it posts to). Targets are channel IDs (C…), never
+  # names.
+  slack:
+    enabled: false
+    api_url: "https://slack.com/api"
+    request_timeout: 10s
+    # Channel IDs webhook URLs may target. Empty = any channel.
+    channel_allowlist: []
+    # Extra hosts trusted for slash-command response_url (e.g. GovSlack's
+    # hooks.slack-gov.com); *.slack.com is always trusted.
+    response_url_hosts: []
+    rate_limit:
+      per_channel_per_sec: 1
+      global_per_sec: 20
+    retry:
+      max_attempts: 5
+      initial_backoff: 1s
+      max_backoff: 60s
+
+  # -- Rendering per sink. `builtin` is alertly's own layout (same structure
+  # in Telegram and Slack); `template` uses `templates.*` (Telegram) and
+  # `templates["slack.<source>"]` / `templates["slack.default"]` (Slack mrkdwn).
+  format:
+    telegram: template
+    slack: builtin
+    labels: [alertname, namespace]
+
+  # -- Named clusters, each with its own webhook token env, Alertmanager and
+  # destinations; served on /v1/clusters/<cluster>/<source>/<destination>.
+  # Empty = single-cluster mode (the legacy /v1/<source>/<chats> route).
+  # Example:
+  #   clusters:
+  #     k8s-prod:
+  #       alias: prod
+  #       auth_token_env: WEBHOOK_AUTH_TOKEN_K8S_PROD
+  #       alertmanager:
+  #         url: http://alertmanager.monitoring.svc:9093
+  #       destinations:
+  #         default:
+  #           - telegram: "-1001234567890:42"
+  #           - slack: "C0123ABCDEF"
+  clusters: {}
 
   # -- Interactive callbacks (Telegram long polling) and Alertmanager silence integration.
   # Keep disabled unless on-call needs in-chat silence buttons.
@@ -283,6 +345,16 @@ config:
         pipeline: true
         watchdog_alert: "Watchdog"
         pipeline_timeout: 4s
+    # -- Silence buttons and `/alertly status` in Slack over Socket Mode
+    # (SLACK_APP_TOKEN, no inbound endpoint). Needs `config.slack.enabled`;
+    # the chat/user allowlists above are Telegram's.
+    slack:
+      enabled: false
+      # Channel IDs where buttons are attached and commands answered.
+      channel_allowlist: []
+      # Optional Slack user IDs (U…/W…). Empty = anyone in an allowed channel.
+      user_allowlist: []
+      command: /alertly
 
   # -- Alertmanager connection for the silence action. Required when updates.enabled=true.
   # Auth is supplied via env: ALERTMANAGER_AUTH_USERNAME + _PASSWORD (basic) or ALERTMANAGER_AUTH_TOKEN (bearer).

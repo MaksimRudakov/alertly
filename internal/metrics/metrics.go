@@ -29,6 +29,10 @@ var (
 	UpdatesPollErrors     *prometheus.CounterVec
 	DedupSkipped          *prometheus.CounterVec
 	LabelCacheLookups     *prometheus.CounterVec
+	SlackAPIDuration      *prometheus.HistogramVec
+	SlackRetries          *prometheus.CounterVec
+	SlackRateLimited      *prometheus.CounterVec
+	SlackSocketReconnects *prometheus.CounterVec
 )
 
 func Init() *prometheus.Registry {
@@ -37,13 +41,13 @@ func Init() *prometheus.Registry {
 
 		NotificationsReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_notifications_received_total",
-			Help: "Number of webhook notifications received per source and resulting status.",
-		}, []string{"source", "status_code"})
+			Help: "Number of webhook notifications received per source, resulting status and cluster.",
+		}, []string{"source", "status_code", "cluster"})
 
 		NotificationsSent = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_notifications_sent_total",
-			Help: "Number of telegram messages sent per chat and outcome.",
-		}, []string{"chat_id", "status"})
+			Help: "Number of messages sent per target chat/channel, outcome and sink (telegram, slack).",
+		}, []string{"chat_id", "status", "sink"})
 
 		TelegramAPIDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "alertly_telegram_api_duration_seconds",
@@ -89,13 +93,13 @@ func Init() *prometheus.Registry {
 
 		CallbacksReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_callbacks_received_total",
-			Help: "Number of Telegram callback_query events handled per action and outcome.",
-		}, []string{"action", "status"})
+			Help: "Number of button presses handled per action, outcome and sink.",
+		}, []string{"action", "status", "sink"})
 
 		CommandsReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_commands_received_total",
-			Help: "Number of chat-ops commands handled per command and outcome. Unknown commands are labelled command=\"unknown\".",
-		}, []string{"command", "status"})
+			Help: "Number of chat-ops commands handled per command, outcome and sink. Unknown commands are labelled command=\"unknown\".",
+		}, []string{"command", "status", "sink"})
 
 		SilencesCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_silences_created_total",
@@ -115,12 +119,33 @@ func Init() *prometheus.Registry {
 		DedupSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_dedup_skipped_total",
 			Help: "Number of notification deliveries suppressed by the in-process dedup cache (caller retry of an already-delivered notification).",
-		}, []string{"source", "chat_id", "status"})
+		}, []string{"source", "chat_id", "status", "cluster", "sink"})
 
 		LabelCacheLookups = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_label_cache_lookups_total",
 			Help: "Number of label-cache fallback lookups during callback handling, per result (hit/miss).",
 		}, []string{"result"})
+
+		SlackAPIDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "alertly_slack_api_duration_seconds",
+			Help:    "Duration of Slack Web API requests per method.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"method"})
+
+		SlackRetries = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_slack_retries_total",
+			Help: "Number of retries against the Slack Web API; reason deadline_skip marks retries aborted for lack of request budget.",
+		}, []string{"reason"})
+
+		SlackSocketReconnects = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_slack_socket_reconnects_total",
+			Help: "Number of Slack Socket Mode reconnects per reason (refresh_requested, error, …).",
+		}, []string{"reason"})
+
+		SlackRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_slack_rate_limited_total",
+			Help: "Number of times a Slack channel was rate limited locally.",
+		}, []string{"channel"})
 
 		registry.MustRegister(
 			NotificationsReceived,
@@ -140,6 +165,10 @@ func Init() *prometheus.Registry {
 			UpdatesPollErrors,
 			DedupSkipped,
 			LabelCacheLookups,
+			SlackAPIDuration,
+			SlackRetries,
+			SlackRateLimited,
+			SlackSocketReconnects,
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)
@@ -150,6 +179,25 @@ func Init() *prometheus.Registry {
 func Registry() *prometheus.Registry { return registry }
 
 func ChatLabel(chatID int64) string { return strconv.FormatInt(chatID, 10) }
+
+// RegisterSinkReadyGauge exposes alertly_sink_ready{sink} (1 ready, 0 not),
+// evaluated on scrape. The pod stays ready while any sink is, so this is the
+// signal for a single messenger being down.
+func RegisterSinkReadyGauge(sinkName string, ready func() bool) {
+	if registry == nil || ready == nil {
+		return
+	}
+	registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "alertly_sink_ready",
+		Help:        "Whether a delivery sink is ready (1) or not (0).",
+		ConstLabels: prometheus.Labels{"sink": sinkName},
+	}, func() float64 {
+		if ready() {
+			return 1
+		}
+		return 0
+	}))
+}
 
 // RegisterSizeGauge exposes fn() as a gauge evaluated on scrape. Meant for
 // cache/tracker sizes that otherwise grow invisibly. Call once per name after

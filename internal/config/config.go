@@ -24,6 +24,11 @@ type Config struct {
 	Updates      Updates           `yaml:"updates"`
 	Alertmanager Alertmanager      `yaml:"alertmanager"`
 	Dedup        Dedup             `yaml:"dedup"`
+	Slack        Slack             `yaml:"slack"`
+	Format       Format            `yaml:"format"`
+	// Clusters name alert sources with their own Alertmanager, webhook token
+	// and destinations. Empty = one implicit `default` cluster (legacy mode).
+	Clusters map[string]Cluster `yaml:"clusters"`
 }
 
 type Server struct {
@@ -42,6 +47,8 @@ type Server struct {
 }
 
 type Telegram struct {
+	// Enabled turns the Telegram sink off for Slack-only installations.
+	Enabled        bool          `yaml:"enabled"`
 	APIURL         string        `yaml:"api_url"`
 	ParseMode      string        `yaml:"parse_mode"`
 	RequestTimeout time.Duration `yaml:"request_timeout"`
@@ -99,6 +106,17 @@ type Updates struct {
 	// Commands enables read-only chat-ops commands (/status) over the same
 	// long-poll loop and allowlists as the silence buttons.
 	Commands Commands `yaml:"commands"`
+	// Slack enables buttons and `/alertly status` in Slack over Socket Mode
+	// (SLACK_APP_TOKEN, xapp-). The chat/user allowlists above are Telegram's.
+	Slack UpdatesSlack `yaml:"slack"`
+}
+
+type UpdatesSlack struct {
+	Enabled          bool     `yaml:"enabled"`
+	ChannelAllowlist []string `yaml:"channel_allowlist"`
+	UserAllowlist    []string `yaml:"user_allowlist"`
+	// Command is the slash command registered for the app.
+	Command string `yaml:"command"`
 }
 
 type Commands struct {
@@ -150,6 +168,7 @@ func Default() Config {
 			ReadHeaderTimeout: 5 * time.Second,
 		},
 		Telegram: Telegram{
+			Enabled:        true,
 			APIURL:         "https://api.telegram.org",
 			ParseMode:      "HTML",
 			RequestTimeout: 10 * time.Second,
@@ -190,6 +209,7 @@ func Default() Config {
 					PipelineTimeout: 4 * time.Second,
 				},
 			},
+			Slack: UpdatesSlack{Command: "/alertly"},
 		},
 		Alertmanager: Alertmanager{
 			URL:            "",
@@ -198,6 +218,25 @@ func Default() Config {
 		Dedup: Dedup{
 			Enabled: true,
 			TTL:     time.Hour,
+		},
+		Slack: Slack{
+			Enabled:        false,
+			APIURL:         "https://slack.com/api",
+			RequestTimeout: 10 * time.Second,
+			RateLimit: SlackRateLimit{
+				PerChannelPerSec: 1,
+				GlobalPerSec:     20,
+			},
+			Retry: Retry{
+				MaxAttempts:    5,
+				InitialBackoff: time.Second,
+				MaxBackoff:     60 * time.Second,
+			},
+		},
+		Format: Format{
+			Telegram: FormatTemplate,
+			Slack:    FormatBuiltin,
+			Labels:   []string{"alertname", "namespace"},
 		},
 	}
 }
@@ -293,8 +332,11 @@ func (c Config) Validate() error {
 		if c.Updates.LabelCacheMax <= 0 {
 			return errors.New("updates.label_cache_max must be > 0 when updates.enabled is true")
 		}
-		if c.Alertmanager.URL == "" {
-			return errors.New("alertmanager.url is required when updates.enabled is true")
+		if !c.HasInteractiveAM() {
+			return errors.New("alertmanager.url (or clusters.<name>.alertmanager.url) is required when updates.enabled is true")
+		}
+		if !c.Telegram.Enabled && !c.Updates.Slack.Enabled {
+			return errors.New("updates.enabled needs an interactive messenger: telegram.enabled or updates.slack.enabled")
 		}
 		if c.Alertmanager.RequestTimeout <= 0 {
 			return errors.New("alertmanager.request_timeout must be > 0 when updates.enabled is true")
@@ -325,7 +367,13 @@ func (c Config) Validate() error {
 	if c.Dedup.Enabled && c.Dedup.TTL <= 0 {
 		return errors.New("dedup.ttl must be > 0 when dedup.enabled is true")
 	}
-	return nil
+	if err := c.validateSinks(); err != nil {
+		return err
+	}
+	if err := c.validateSlackUpdates(); err != nil {
+		return err
+	}
+	return c.validateClusters()
 }
 
 func Path() string {

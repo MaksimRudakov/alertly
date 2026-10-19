@@ -20,25 +20,29 @@ func init() {
 
 func TestParseCallbackData(t *testing.T) {
 	cases := []struct {
-		in         string
-		wantAct    string
-		wantFP     string
-		wantDur    string
-		wantErr    bool
-		descripion string
+		in          string
+		wantAct     string
+		wantCluster string
+		wantFP      string
+		wantDur     string
+		wantErr     bool
+		descripion  string
 	}{
-		{"s|abc|1h", "s", "abc", "1h", false, "normal"},
-		{"s|9bcf23a1e4d08b17|24h", "s", "9bcf23a1e4d08b17", "24h", false, "fp16"},
-		{"s|abc", "", "", "", true, "too few fields"},
-		{"s|abc|1h|extra", "", "", "", true, "too many fields"},
-		{"|abc|1h", "", "", "", true, "empty action"},
-		{"s||1h", "", "", "", true, "empty fp"},
-		{"s|abc|", "", "", "", true, "empty duration"},
-		{"", "", "", "", true, "empty"},
+		{"s|abc|1h", "s", "", "abc", "1h", false, "normal"},
+		{"s|9bcf23a1e4d08b17|24h", "s", "", "9bcf23a1e4d08b17", "24h", false, "fp16"},
+		{"s|prod|abc|1h", "s", "prod", "abc", "1h", false, "named cluster"},
+		{"u|prod|sil-1|-", "u", "prod", "sil-1", "-", false, "named cluster undo"},
+		{"s|abc", "", "", "", "", true, "too few fields"},
+		{"s|prod|abc|1h|extra", "", "", "", "", true, "too many fields"},
+		{"s||abc|1h", "", "", "", "", true, "empty cluster"},
+		{"|abc|1h", "", "", "", "", true, "empty action"},
+		{"s||1h", "", "", "", "", true, "empty fp"},
+		{"s|abc|", "", "", "", "", true, "empty duration"},
+		{"", "", "", "", "", true, "empty"},
 	}
 	for _, c := range cases {
 		t.Run(c.descripion, func(t *testing.T) {
-			act, fp, dur, err := ParseCallbackData(c.in)
+			p, err := ParseCallbackData(c.in)
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("expected error for %q", c.in)
@@ -48,8 +52,8 @@ func TestParseCallbackData(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if act != c.wantAct || fp != c.wantFP || dur != c.wantDur {
-				t.Errorf("got (%q,%q,%q), want (%q,%q,%q)", act, fp, dur, c.wantAct, c.wantFP, c.wantDur)
+			if p.Action != c.wantAct || p.Cluster != c.wantCluster || p.Value != c.wantFP || p.Duration != c.wantDur {
+				t.Errorf("got %+v, want (%q,%q,%q,%q)", p, c.wantAct, c.wantCluster, c.wantFP, c.wantDur)
 			}
 		})
 	}
