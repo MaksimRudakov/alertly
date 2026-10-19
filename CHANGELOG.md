@@ -6,9 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-19
+
+Resolve linking: the resolve of an Alertmanager alert can answer or rewrite its firing message. Off by default (`resolve.mode: new`) — without a `resolve` block alertly behaves as 0.8.0.
+
 ### Added
 - **Resolve as a reply** (`resolve.mode`: `new` | `reply` | `edit`, default `new`): the resolve of an Alertmanager alert can answer its firing message — a Telegram reply (`reply_parameters`, sent even if the original is gone) or a Slack thread reply (`resolve.slack_broadcast` to also show it in the channel) — while the firing message is rewritten as resolved and its buttons removed; `edit` only rewrites (one message per incident, no notification). Incidents are keyed by cluster, fingerprint, `startsAt` and chat; repeated firing messages (`repeat_interval`) are all rewritten, the newest answered. Links are in memory (`resolve.ttl` 168h, `resolve.max_entries` 10000): an unknown firing message — restart, eviction, another replica — falls back to a new message. Metrics `alertly_resolve_total{sink,outcome}`, `alertly_resolve_links_entries`; `/status` shows the link count.
 - Builtin layout: the resolved status line says how long the alert fired (`Resolved after 12m`); `.StartsAt` in the template data.
+
+### Changed
+- Builtin layout (Telegram and Slack): a resolved alert leads with ✅ (`:white_check_mark:` in the Slack header) instead of its severity emoji. Custom templates are unaffected — `severity_emoji` still maps the severity.
 
 ## [0.8.0] - 2026-10-19
 
@@ -236,7 +243,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/MaksimRudakov/alertly/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/MaksimRudakov/alertly/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/MaksimRudakov/alertly/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/MaksimRudakov/alertly/compare/v0.7.2...v0.7.3

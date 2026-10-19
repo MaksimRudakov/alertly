@@ -37,9 +37,6 @@ func EscapeMrkdwn(s string) string {
 
 var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
-// severityShortcode renders the severity emoji as a Slack shortcode: a
-// unicode emoji with a variation selector (ℹ️) can show as a blank box in a
-// plain_text header, shortcodes always render.
 // headerShortcode marks a resolved alert as such whatever its severity.
 func headerShortcode(n notification.Notification) string {
 	if n.Status == "resolved" {
@@ -48,6 +45,9 @@ func headerShortcode(n notification.Notification) string {
 	return severityShortcode(n.Severity)
 }
 
+// severityShortcode renders the severity emoji as a Slack shortcode: a
+// unicode emoji with a variation selector (ℹ️) can show as a blank box in a
+// plain_text header, shortcodes always render.
 func severityShortcode(severity string) string {
 	switch strings.ToLower(strings.TrimSpace(severity)) {
 	case "critical", "crit", "fatal", "emergency":
