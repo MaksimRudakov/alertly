@@ -182,6 +182,26 @@ func (t *ButtonTracker) ConsumeRef(ref sink.MessageRef) {
 	}
 }
 
+// ForgetRef is ConsumeRef (ButtonRegistrar).
+func (t *ButtonTracker) ForgetRef(ref sink.MessageRef) { t.ConsumeRef(ref) }
+
+// ButtonSet is the webhook path's view of both trackers: new messages are
+// registered for silence buttons; a message alertly rewrites is forgotten by
+// both, so neither sweeper restores its old body.
+type ButtonSet struct {
+	Silence *ButtonTracker
+	Undo    *ButtonTracker
+}
+
+func (b ButtonSet) RegisterRef(cluster string, ref sink.MessageRef, fingerprint string, part sink.Part) {
+	b.Silence.RegisterRef(cluster, ref, fingerprint, part)
+}
+
+func (b ButtonSet) ForgetRef(ref sink.MessageRef) {
+	b.Silence.ConsumeRef(ref)
+	b.Undo.ConsumeRef(ref)
+}
+
 // ExpiredEntry is returned from Sweep so callers can remove the buttons.
 // ChatID/MessageID are set for Telegram messages.
 type ExpiredEntry struct {

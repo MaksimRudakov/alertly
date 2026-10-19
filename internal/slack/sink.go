@@ -23,6 +23,8 @@ type Sink struct {
 	renderer tmpl.Renderer
 	builtin  bool
 	labels   []string
+	// replyBroadcast: see SetReplyBroadcast.
+	replyBroadcast bool
 }
 
 // NewSink builds the Slack sink. builtin=false renders templates named
@@ -69,6 +71,12 @@ func (s *Sink) Send(ctx context.Context, t sink.Target, p sink.Part, actions *si
 		return sink.MessageRef{}, err
 	}
 	msg.ThreadTS = t.Thread
+	if t.ReplyTo != "" {
+		if msg.ThreadTS == "" {
+			msg.ThreadTS = t.ReplyTo
+		}
+		msg.ReplyBroadcast = s.replyBroadcast
+	}
 	ts, err := s.client.PostMessage(ctx, msg)
 	if err != nil {
 		return sink.MessageRef{}, err
@@ -85,6 +93,15 @@ func (s *Sink) SetActions(ctx context.Context, ref sink.MessageRef, original sin
 	}
 	return s.client.UpdateMessage(ctx, ref.ID, msg)
 }
+
+// Edit rewrites the message (chat.update replaces body and buttons at once).
+func (s *Sink) Edit(ctx context.Context, ref sink.MessageRef, p sink.Part, actions *sink.Actions) error {
+	return s.SetActions(ctx, ref, p, actions)
+}
+
+// SetReplyBroadcast makes replies (resolve.mode=reply) also appear in the
+// channel, not only in the thread.
+func (s *Sink) SetReplyBroadcast(v bool) { s.replyBroadcast = v }
 
 // Client exposes the transport for interactive features.
 func (s *Sink) Client() Client { return s.client }

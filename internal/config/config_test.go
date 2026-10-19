@@ -101,6 +101,9 @@ func TestValidateErrors(t *testing.T) {
 	}{
 		{"bad level", `logging: {level: "fatal", format: "json"}`},
 		{"bad format", `logging: {level: "info", format: "csv"}`},
+		{"bad resolve mode", `resolve: {mode: thread}`},
+		{"resolve ttl zero", `resolve: {mode: reply, ttl: 0s}`},
+		{"resolve max zero", `resolve: {mode: edit, max_entries: 0}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -109,6 +112,19 @@ func TestValidateErrors(t *testing.T) {
 				t.Error("expected validation error")
 			}
 		})
+	}
+}
+
+func TestResolveDefaults(t *testing.T) {
+	cfg, err := Load(writeFile(t, `resolve: {mode: reply}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Resolve.Mode != ResolveReply || cfg.Resolve.TTL != 7*24*time.Hour || cfg.Resolve.MaxEntries != 10000 || cfg.Resolve.SlackBroadcast {
+		t.Errorf("resolve: %+v", cfg.Resolve)
+	}
+	if Default().Resolve.Mode != ResolveNew {
+		t.Error("default must keep resolves as new messages")
 	}
 }
 

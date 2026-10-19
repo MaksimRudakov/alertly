@@ -25,6 +25,10 @@ type Target struct {
 	Sink   string
 	Chat   string
 	Thread string // "" = no thread/topic
+	// ReplyTo is the ID of a message this one answers (Telegram reply, Slack
+	// thread when Thread is empty). Not part of the address: String() and
+	// dedup keys ignore it.
+	ReplyTo string
 }
 
 func (t Target) String() string {
@@ -88,6 +92,9 @@ type Sink interface {
 	// them). original is the part as sent, for messengers that must resend
 	// the whole message body to change its buttons (Slack chat.update).
 	SetActions(ctx context.Context, ref MessageRef, original Part, actions *Actions) error
+	// Edit rewrites a delivered message with p and actions (nil removes the
+	// buttons). An unchanged message is not an error.
+	Edit(ctx context.Context, ref MessageRef, p Part, actions *Actions) error
 	// Probe checks credentials and reachability (getMe / auth.test).
 	Probe(ctx context.Context) error
 	Classify(err error) ErrorClass

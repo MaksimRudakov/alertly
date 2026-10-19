@@ -61,6 +61,10 @@ type Deps struct {
 	Tracker               ButtonRegistrar
 	Dedup                 *dedup.Cache
 	Activity              *ActivityTracker
+	// ResolveMode is resolve.mode; Messages links firing messages to their
+	// resolves (nil with mode "new").
+	ResolveMode string
+	Messages    *MessageLog
 }
 
 func New(cfg config.Server, deps Deps) *Server {
@@ -99,6 +103,8 @@ func New(cfg config.Server, deps Deps) *Server {
 			tracker:      deps.Tracker,
 			dedup:        deps.Dedup,
 			activity:     deps.Activity,
+			resolveMode:  deps.ResolveMode,
+			messages:     deps.Messages,
 		}
 		if deps.AuthToken != "" {
 			legacy := base

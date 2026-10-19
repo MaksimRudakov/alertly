@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/notification"
@@ -61,9 +62,14 @@ func (s *Sink) Send(ctx context.Context, t sink.Target, p sink.Part, actions *si
 	if err != nil {
 		return sink.MessageRef{}, err
 	}
-	var opts *SendOptions
+	opts := &SendOptions{}
 	if actions != nil && len(actions.Rows) > 0 {
-		opts = &SendOptions{ReplyMarkup: Keyboard(actions)}
+		opts.ReplyMarkup = Keyboard(actions)
+	}
+	if t.ReplyTo != "" {
+		if opts.ReplyTo, err = strconv.ParseInt(t.ReplyTo, 10, 64); err != nil {
+			return sink.MessageRef{}, fmt.Errorf("telegram target: invalid reply-to id %q", t.ReplyTo)
+		}
 	}
 	msgID, err := s.client.SendMessage(ctx, chatID, threadID, p.Text, opts)
 	if err != nil {
@@ -82,6 +88,25 @@ func (s *Sink) SetActions(ctx context.Context, ref sink.MessageRef, _ sink.Part,
 		return fmt.Errorf("telegram ref: invalid message id %q", ref.ID)
 	}
 	return s.client.EditMessageReplyMarkup(ctx, chatID, msgID, Keyboard(actions))
+}
+
+// Edit rewrites text and keyboard; Telegram's "message is not modified"
+// (the same content twice, e.g. a redelivered resolve) is success.
+func (s *Sink) Edit(ctx context.Context, ref sink.MessageRef, p sink.Part, actions *sink.Actions) error {
+	chatID, err := strconv.ParseInt(ref.Chat, 10, 64)
+	if err != nil {
+		return fmt.Errorf("telegram ref: invalid chat id %q", ref.Chat)
+	}
+	msgID, err := strconv.ParseInt(ref.ID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("telegram ref: invalid message id %q", ref.ID)
+	}
+	err = s.client.EditMessageText(ctx, chatID, msgID, p.Text, Keyboard(actions))
+	var ae *APIError
+	if errors.As(err, &ae) && ae.StatusCode == http.StatusBadRequest && strings.Contains(ae.Body, "message is not modified") {
+		return nil
+	}
+	return err
 }
 
 func (s *Sink) Probe(ctx context.Context) error { return s.client.GetMe(ctx) }

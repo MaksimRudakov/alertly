@@ -21,7 +21,11 @@ import (
 //	<a href="…">Runbook</a>
 func RenderBuiltin(n notification.Notification, labels []string) string {
 	var b strings.Builder
-	b.WriteString(tmpl.SeverityEmoji(n.Severity))
+	if n.Status == "resolved" {
+		b.WriteString("✅")
+	} else {
+		b.WriteString(tmpl.SeverityEmoji(n.Severity))
+	}
 	b.WriteString(" <b>")
 	b.WriteString(tmpl.EscapeHTML(n.Title))
 	b.WriteString("</b>\n")

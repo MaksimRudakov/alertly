@@ -2,9 +2,15 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/MaksimRudakov/alertly/internal/notification"
@@ -98,5 +104,64 @@ func TestSinkRender_TemplateErrorIsRenderError(t *testing.T) {
 	var re *sink.RenderError
 	if !errors.As(err, &re) {
 		t.Fatalf("want *sink.RenderError, got %T %v", err, err)
+	}
+}
+
+func TestSink_ReplyAndEdit(t *testing.T) {
+	var mu sync.Mutex
+	var bodies = map[string]map[string]any{}
+	notModified := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		mu.Lock()
+		bodies[method] = b
+		mu.Unlock()
+		if method == "editMessageText" && notModified {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: message is not modified: specified new message content and reply markup are exactly the same"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
+	}))
+	defer srv.Close()
+	s := NewSink(New(Config{APIURL: srv.URL, Token: "t", MaxAttempts: 1}, nil, slog.New(slog.NewTextHandler(io.Discard, nil))), nil, true, nil)
+	ctx := context.Background()
+
+	if _, err := s.Send(ctx, sink.Target{Sink: sink.Telegram, Chat: "-100", Thread: "3", ReplyTo: "42"}, sink.Part{Text: "resolved"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	rp, _ := bodies["sendMessage"]["reply_parameters"].(map[string]any)
+	if rp["message_id"] != float64(42) || rp["allow_sending_without_reply"] != true || bodies["sendMessage"]["message_thread_id"] != float64(3) {
+		t.Errorf("reply must target message 42 in topic 3 and survive its deletion: %v", bodies["sendMessage"])
+	}
+	if _, err := s.Send(ctx, sink.Target{Sink: sink.Telegram, Chat: "-100"}, sink.Part{Text: "x"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bodies["sendMessage"]["reply_parameters"]; ok {
+		t.Error("plain send must not carry reply_parameters")
+	}
+
+	ref := sink.MessageRef{Sink: sink.Telegram, Chat: "-100", ID: "42"}
+	if err := s.Edit(ctx, ref, sink.Part{Text: "✅ resolved"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if e := bodies["editMessageText"]; e["message_id"] != float64(42) || e["text"] != "✅ resolved" || e["reply_markup"] != nil {
+		t.Errorf("edit must rewrite text and drop the keyboard: %v", e)
+	}
+	notModified = true
+	if err := s.Edit(ctx, ref, sink.Part{Text: "✅ resolved"}, nil); err != nil {
+		t.Errorf("an unchanged message is not an error: %v", err)
+	}
+}
+
+func TestRenderBuiltin_ResolvedIsCheckMark(t *testing.T) {
+	got := RenderBuiltin(notification.Notification{Title: "Disk", Status: "resolved", Severity: "critical"}, nil)
+	if !strings.HasPrefix(got, "✅ <b>Disk</b>") {
+		t.Errorf("resolved must lead with ✅, got %q", got)
+	}
+	if got := RenderBuiltin(notification.Notification{Title: "Disk", Status: "firing", Severity: "critical"}, nil); !strings.HasPrefix(got, "🔥") {
+		t.Errorf("firing keeps the severity emoji, got %q", got)
 	}
 }

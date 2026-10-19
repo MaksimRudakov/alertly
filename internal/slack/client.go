@@ -60,12 +60,14 @@ type Message struct {
 	Channel string `json:"channel"`
 	// Text is the notification/screen-reader fallback; Slack does not
 	// display it when Blocks are present.
-	Text        string            `json:"text,omitempty"`
-	ThreadTS    string            `json:"thread_ts,omitempty"`
-	Blocks      []json.RawMessage `json:"blocks,omitempty"`
-	Attachments []Attachment      `json:"attachments,omitempty"`
-	UnfurlLinks bool              `json:"unfurl_links"`
-	UnfurlMedia bool              `json:"unfurl_media"`
+	Text     string `json:"text,omitempty"`
+	ThreadTS string `json:"thread_ts,omitempty"`
+	// ReplyBroadcast also shows a thread reply in the channel.
+	ReplyBroadcast bool              `json:"reply_broadcast,omitempty"`
+	Blocks         []json.RawMessage `json:"blocks,omitempty"`
+	Attachments    []Attachment      `json:"attachments,omitempty"`
+	UnfurlLinks    bool              `json:"unfurl_links"`
+	UnfurlMedia    bool              `json:"unfurl_media"`
 }
 
 // Attachment carries the severity colour bar around Block Kit blocks.

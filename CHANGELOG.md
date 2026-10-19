@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+- **Resolve as a reply** (`resolve.mode`: `new` | `reply` | `edit`, default `new`): the resolve of an Alertmanager alert can answer its firing message — a Telegram reply (`reply_parameters`, sent even if the original is gone) or a Slack thread reply (`resolve.slack_broadcast` to also show it in the channel) — while the firing message is rewritten as resolved and its buttons removed; `edit` only rewrites (one message per incident, no notification). Incidents are keyed by cluster, fingerprint, `startsAt` and chat; repeated firing messages (`repeat_interval`) are all rewritten, the newest answered. Links are in memory (`resolve.ttl` 168h, `resolve.max_entries` 10000): an unknown firing message — restart, eviction, another replica — falls back to a new message. Metrics `alertly_resolve_total{sink,outcome}`, `alertly_resolve_links_entries`; `/status` shows the link count.
+- Builtin layout: the resolved status line says how long the alert fired (`Resolved after 12m`); `.StartsAt` in the template data.
+
 ## [0.8.0] - 2026-10-19
 
 Slack as a second messenger — delivery, silence buttons and `/alertly status` — and multi-cluster routing. Backward compatible for existing configs: without `slack`, `clusters` and `updates.slack` blocks alertly behaves as 0.7.x (same routes, message format, silence button data). One breaking detail for dashboards: see *Changed → metrics*.

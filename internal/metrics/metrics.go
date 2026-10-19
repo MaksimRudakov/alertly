@@ -33,6 +33,7 @@ var (
 	SlackRetries          *prometheus.CounterVec
 	SlackRateLimited      *prometheus.CounterVec
 	SlackSocketReconnects *prometheus.CounterVec
+	ResolveLinked         *prometheus.CounterVec
 )
 
 func Init() *prometheus.Registry {
@@ -142,6 +143,11 @@ func Init() *prometheus.Registry {
 			Help: "Number of Slack Socket Mode reconnects per reason (refresh_requested, error, …).",
 		}, []string{"reason"})
 
+		ResolveLinked = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alertly_resolve_total",
+			Help: "Resolved alerts by how they reached a chat with resolve.mode reply/edit: replied, edited, unlinked (firing message unknown — restart, eviction, TTL — sent as a new message), edit_failed.",
+		}, []string{"sink", "outcome"})
+
 		SlackRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "alertly_slack_rate_limited_total",
 			Help: "Number of times a Slack channel was rate limited locally.",
@@ -169,6 +175,7 @@ func Init() *prometheus.Registry {
 			SlackRetries,
 			SlackRateLimited,
 			SlackSocketReconnects,
+			ResolveLinked,
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)

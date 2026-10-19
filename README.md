@@ -15,6 +15,7 @@ Lightweight HTTP service that ingests webhooks from **Alertmanager** and **Kubew
 - **Clusters and named destinations**: one alertly can serve several clusters, each with its own webhook token, Alertmanager and `destination → [telegram…, slack…]` routing; or run one alertly per cluster with the same config model ([Clusters](#clusters-and-destinations)).
 - **Interactive Silence buttons** on firing Alertmanager alerts, in Telegram (long polling) and Slack (Socket Mode): silences created through the Alertmanager API v2 (matcher scope configurable), **↩️ Undo** window after each silence, chat/user allowlists, TTL-limited buttons. Off by default (`updates.enabled`).
 - **Chat-ops status**: `/status` in Telegram, `/alertly status` in Slack — self-health, per-messenger readiness and the Alertmanager/Watchdog pipeline of every cluster routed to the chat. Off by default (`updates.commands.enabled`).
+- **Resolve as a reply** (`resolve.mode: reply`): the resolve of an Alertmanager alert answers its firing message (Telegram reply, Slack thread) and the firing message is rewritten as resolved, buttons removed; or `edit` — only the rewrite, half the messages ([Resolve](#resolve-as-a-reply)).
 - Multiple chats and topic threads per webhook URL: `/v1/alertmanager/-100123,-100456:42`.
 - Per-chat + global Telegram rate limiter; retry with exponential backoff and `Retry-After` honoring.
 - **Deadline-aware retry**: aborts the next backoff sleep when there's no time left to ACK the caller, preventing «delivered to Telegram but caller already gave up» duplicates.
@@ -381,6 +382,26 @@ The same binary and config model cover both; pick by operational needs, not by c
 
 Messenger constraint, not an alertly one: Telegram allows **one `getUpdates` consumer per bot token** (a second one gets `409 Conflict`) and Slack spreads Socket Mode events across all connections of an app, so interactivity must run in exactly one alertly per bot token / Slack App. Sending from many instances with the same bot is fine.
 
+## Resolve as a reply
+
+By default a resolved alert is a new message, and the firing one stays red with live Silence buttons above it. `resolve.mode` links the two (Alertmanager alerts only — other sources have no firing/resolved pair):
+
+| Mode | Resolve | Firing message | Messages |
+|---|---|---|---|
+| `new` (default) | new message | unchanged | 2 per incident |
+| `reply` | reply to the firing message (Telegram reply, Slack thread; `slack_broadcast: true` also shows it in the channel) | rewritten as resolved, buttons removed | 2, linked |
+| `edit` | — | rewritten as resolved, buttons removed | 1 — but an edit **does not notify** anyone |
+
+```yaml
+resolve:
+  mode: reply          # new | reply | edit
+  ttl: 168h            # how long a firing message stays linkable
+  max_entries: 10000   # FIFO bound
+  slack_broadcast: false
+```
+
+The rewrite uses the normal resolved rendering (builtin: ✅ and `Resolved after 12m`; templates branch on `.Status` as usual). An incident is `cluster + fingerprint + startsAt` in one chat: a re-fire after the resolve is a new incident with a new message. Long-firing alerts re-sent every `repeat_interval` land as several messages; the resolve rewrites all of them (up to 5) and replies to the newest. When the firing message is unknown — restart, eviction, TTL, another replica — the resolve is a new message as in mode `new`; in `edit` mode a failed edit (message deleted) falls back the same way. Multi-part messages: the first part is rewritten, the buttons are removed from the last. Metrics: `alertly_resolve_total{sink,outcome}` (`replied`, `edited`, `unlinked`, `edit_failed`), `alertly_resolve_links_entries`.
+
 ## Deduplication
 
 Telegram has no idempotency key, so any retry from upstream — most commonly Alertmanager re-sending a webhook because the previous response did not arrive in time — would be delivered as a fresh chat message. alertly absorbs that retry with a small in-process cache.
@@ -451,7 +472,9 @@ A pod restart re-opens the dedup window for all in-flight alerts — accepted tr
 | `alertly_silences_deleted_total` | counter | `status` |
 | `alertly_updates_poll_errors_total` | counter | `reason` |
 | `alertly_label_cache_lookups_total` | counter | `result` (`hit`/`miss`) |
+| `alertly_resolve_total` | counter | `sink`, `outcome` |
 | `alertly_dedup_cache_entries` | gauge | — |
+| `alertly_resolve_links_entries` | gauge | — |
 | `alertly_button_tracker_entries` | gauge | — |
 | `alertly_undo_tracker_entries` | gauge | — |
 | `alertly_label_cache_entries` | gauge | — |

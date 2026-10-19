@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MaksimRudakov/alertly/internal/config"
 	"github.com/MaksimRudakov/alertly/internal/dedup"
 	"github.com/MaksimRudakov/alertly/internal/metrics"
 	"github.com/MaksimRudakov/alertly/internal/notification"
@@ -35,12 +36,20 @@ type webhookDeps struct {
 	tracker      ButtonRegistrar
 	dedup        *dedup.Cache
 	activity     *ActivityTracker
+	// resolveMode/messages link resolves to firing messages (resolve.mode);
+	// messages is nil for mode "new".
+	resolveMode string
+	messages    *MessageLog
 }
 
 // ButtonRegistrar records sent alert messages so the callback handler can
 // validate and the sweeper can expire them.
 type ButtonRegistrar interface {
 	RegisterRef(cluster string, ref sink.MessageRef, fingerprint string, part sink.Part)
+	// ForgetRef drops a message alertly rewrote itself, so the sweeper or a
+	// late click does not restore its old body (Slack chat.update resends
+	// the stored part).
+	ForgetRef(ref sink.MessageRef)
 }
 
 // KeyboardBuilder returns the buttons for a given cluster + target +
@@ -219,6 +228,23 @@ func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, clu
 		return true
 	}
 
+	linkKey, linkable := d.linkKey(cluster, target, n)
+	if linkable && n.Status == "resolved" {
+		if msgs, ok := d.messages.Get(linkKey); ok {
+			return d.deliverResolve(ctx, logger, cluster, s, target, n, parts, msgs, linkKey, dedupKey, st)
+		}
+		metrics.ResolveLinked.WithLabelValues(target.Sink, "unlinked").Inc()
+	}
+	cont, sent := d.sendParts(ctx, logger, cluster, s, target, n, parts, dedupKey, st)
+	if linkable && n.Status == "firing" && sent.First.ID != "" {
+		d.messages.Add(linkKey, sent)
+	}
+	return cont
+}
+
+// sendParts delivers parts as new messages. sent has First set only when
+// every part landed.
+func (d webhookDeps) sendParts(ctx context.Context, logger *slog.Logger, cluster *Cluster, s sink.Sink, target sink.Target, n notification.Notification, parts []sink.Part, dedupKey string, st *sinkStats) (cont bool, sent FiringMessage) {
 	sentAny, failed := false, false
 	for idx, part := range parts {
 		st.Attempts++
@@ -237,7 +263,7 @@ func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, clu
 			if !sentAny {
 				d.dedup.Forget(dedupKey)
 			}
-			return false
+			return false, FiringMessage{}
 		}
 		if err != nil {
 			st.Errors++
@@ -252,6 +278,12 @@ func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, clu
 		}
 		sentAny = true
 		metrics.NotificationsSent.WithLabelValues(target.Chat, "ok", target.Sink).Inc()
+		if idx == 0 {
+			sent.First = ref
+		}
+		if isLastPart {
+			sent.Last, sent.LastPart = ref, part
+		}
 		if isLastPart && actions != nil && d.tracker != nil && ref.ID != "" && ref.ID != "0" {
 			d.tracker.RegisterRef(cluster.Name, ref, n.Fingerprint, part)
 		}
@@ -262,7 +294,121 @@ func (d webhookDeps) deliverTarget(ctx context.Context, logger *slog.Logger, clu
 	if !sentAny && failed {
 		d.dedup.Forget(dedupKey)
 	}
-	return true
+	if failed || sent.First.ID == "0" {
+		return true, FiringMessage{} // partial or dry run: nothing to link
+	}
+	return true, sent
+}
+
+// linkKey reports whether n takes part in resolve linking and its key.
+// Only Alertmanager has firing/resolved pairs of one incident.
+func (d webhookDeps) linkKey(cluster *Cluster, target sink.Target, n notification.Notification) (string, bool) {
+	if d.messages == nil || d.source.Name() != "alertmanager" || n.Fingerprint == "" || n.StartsAt.IsZero() {
+		return "", false
+	}
+	return MessageLogKey(cluster.Name, n.Fingerprint, n.StartsAt, target), true
+}
+
+// deliverResolve answers and/or rewrites the firing messages of n's incident.
+// reply: the resolve goes out as a reply to the newest firing message (that
+// is the delivery), then every firing message is rewritten as resolved
+// without buttons (cosmetic: a failure is logged, not counted). edit: the
+// rewrite is the delivery; if no firing message could be rewritten the
+// resolve falls back to a new message.
+func (d webhookDeps) deliverResolve(ctx context.Context, logger *slog.Logger, cluster *Cluster, s sink.Sink, target sink.Target, n notification.Notification, parts []sink.Part, msgs []FiringMessage, linkKey, dedupKey string, st *sinkStats) bool {
+	newest := msgs[len(msgs)-1]
+	if d.resolveMode == config.ResolveReply {
+		reply := target
+		reply.ReplyTo = newest.First.ID
+		// The firing message itself is rewritten with the full resolve; the
+		// reply only has to say "resolved" under it.
+		replyParts, err := s.Render(d.templateName, compactResolve(n))
+		if err != nil {
+			replyParts = parts
+		}
+		errsBefore := st.Errors
+		cont, _ := d.sendParts(ctx, logger, cluster, s, reply, n, replyParts, dedupKey, st)
+		if !cont {
+			return false
+		}
+		if st.Errors-errsBefore == len(replyParts) {
+			return true // nothing landed: keep the link for the caller's retry
+		}
+		metrics.ResolveLinked.WithLabelValues(target.Sink, "replied").Inc()
+		d.rewrite(ctx, logger, s, target, n, parts[0], msgs)
+		d.messages.Delete(linkKey)
+		return true
+	}
+
+	edited := d.rewrite(ctx, logger, s, target, n, parts[0], msgs)
+	if edited > 0 {
+		d.messages.Delete(linkKey)
+		st.Attempts++
+		metrics.ResolveLinked.WithLabelValues(target.Sink, "edited").Inc()
+		metrics.NotificationsSent.WithLabelValues(target.Chat, "ok", target.Sink).Inc()
+		return true
+	}
+	if ctx.Err() != nil {
+		d.dedup.Forget(dedupKey)
+		return false
+	}
+	d.messages.Delete(linkKey)
+	logger.Warn("resolve: firing messages could not be edited, sending a new message",
+		"target", target.String(), "fingerprint", n.Fingerprint)
+	cont, _ := d.sendParts(ctx, logger, cluster, s, target, n, parts, dedupKey, st)
+	return cont
+}
+
+// compactResolve keeps the title and status line of a resolve: what a reply
+// under the (rewritten) firing message needs.
+func compactResolve(n notification.Notification) notification.Notification {
+	n.Body = ""
+	n.Labels = nil
+	n.Links = nil
+	return n
+}
+
+// rewrite turns every firing message into the resolved one (first part) and
+// drops the buttons of the part that carried them. It returns how many
+// firing messages were rewritten.
+func (d webhookDeps) rewrite(ctx context.Context, logger *slog.Logger, s sink.Sink, target sink.Target, n notification.Notification, resolved sink.Part, msgs []FiringMessage) int {
+	edited := 0
+	for _, m := range msgs {
+		if ctx.Err() != nil {
+			break
+		}
+		if d.tracker != nil {
+			d.tracker.ForgetRef(m.Last)
+		}
+		if err := d.call(s, s.Edit(ctx, m.First, resolved, nil)); err != nil {
+			metrics.ResolveLinked.WithLabelValues(target.Sink, "edit_failed").Inc()
+			logger.Warn("resolve: edit firing message failed",
+				"target", target.String(), "fingerprint", n.Fingerprint, "message", m.First.ID, "err", err)
+			continue
+		}
+		edited++
+		if m.Last != m.First {
+			if err := d.call(s, s.SetActions(ctx, m.Last, m.LastPart, nil)); err != nil {
+				logger.Warn("resolve: remove buttons failed",
+					"target", target.String(), "message", m.Last.ID, "err", err)
+			}
+		}
+	}
+	return edited
+}
+
+// call records a messenger call outcome in the sink's readiness, like send.
+func (d webhookDeps) call(s sink.Sink, err error) error {
+	tracker := d.readiness.Get(s.Name())
+	if tracker == nil {
+		return err
+	}
+	if err == nil {
+		tracker.RecordSendSuccess()
+	} else {
+		tracker.RecordSendFailure(s.Classify(err) == sink.ErrServer)
+	}
+	return err
 }
 
 func (d webhookDeps) send(ctx context.Context, s sink.Sink, t sink.Target, p sink.Part, actions *sink.Actions) (sink.MessageRef, error) {

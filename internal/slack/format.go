@@ -40,6 +40,14 @@ var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 // severityShortcode renders the severity emoji as a Slack shortcode: a
 // unicode emoji with a variation selector (ℹ️) can show as a blank box in a
 // plain_text header, shortcodes always render.
+// headerShortcode marks a resolved alert as such whatever its severity.
+func headerShortcode(n notification.Notification) string {
+	if n.Status == "resolved" {
+		return ":white_check_mark:"
+	}
+	return severityShortcode(n.Severity)
+}
+
 func severityShortcode(severity string) string {
 	switch strings.ToLower(strings.TrimSpace(severity)) {
 	case "critical", "crit", "fatal", "emergency":
@@ -54,7 +62,11 @@ func severityShortcode(severity string) string {
 // fallbackText is the top-level `text`: with blocks Slack does not display
 // it, but uses it for notifications and screen readers.
 func fallbackText(n notification.Notification) string {
-	return truncateRunes(tmpl.SeverityEmoji(n.Severity)+" "+n.Title+" — "+strings.Join(n.StatusLine(), " · "), fallbackTextLimit)
+	emoji := tmpl.SeverityEmoji(n.Severity)
+	if n.Status == "resolved" {
+		emoji = "✅"
+	}
+	return truncateRunes(emoji+" "+n.Title+" — "+strings.Join(n.StatusLine(), " · "), fallbackTextLimit)
 }
 
 // renderBuiltin is alertly's own Slack layout, the Block Kit twin of the
@@ -64,7 +76,7 @@ func renderBuiltin(n notification.Notification, labels []string) []messagePart {
 	head := []json.RawMessage{
 		block(map[string]any{
 			"type": "header",
-			"text": map[string]any{"type": "plain_text", "text": truncateRunes(severityShortcode(n.Severity)+" "+n.Title, headerTextLimit), "emoji": true},
+			"text": map[string]any{"type": "plain_text", "text": truncateRunes(headerShortcode(n)+" "+n.Title, headerTextLimit), "emoji": true},
 		}),
 		block(map[string]any{
 			"type":     "context",

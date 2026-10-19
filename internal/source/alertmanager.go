@@ -86,6 +86,7 @@ func alertToNotification(a amAlert) notification.Notification {
 		Annotations: copyMap(a.Annotations),
 		Links:       links,
 		Timestamp:   ts,
+		StartsAt:    a.StartsAt,
 	}
 }
 

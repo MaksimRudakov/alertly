@@ -212,10 +212,15 @@ func TestRenderBuiltin(t *testing.T) {
 		t.Errorf("fallback text: %q", parts[0].Text)
 	}
 
-	n.Status, n.Severity = "resolved", "info"
+	n.Status, n.Severity = "firing", "info"
 	parts, _ = NewSink(nil, nil, true, nil).Render("x", n)
-	if raw := string(parts[0].Payload); !strings.Contains(raw, ":information_source: ") || !strings.Contains(raw, "Resolved") {
-		t.Errorf("resolved info header/status: %s", raw)
+	if raw := string(parts[0].Payload); !strings.Contains(raw, ":information_source: ") {
+		t.Errorf("info header: %s", raw)
+	}
+	n.Status, n.Severity = "resolved", "critical"
+	parts, _ = NewSink(nil, nil, true, nil).Render("x", n)
+	if raw := string(parts[0].Payload); !strings.Contains(raw, ":white_check_mark: ") || strings.Contains(raw, ":fire:") || !strings.Contains(raw, "Resolved") || !strings.HasPrefix(parts[0].Text, "✅") {
+		t.Errorf("a resolved alert is ✅ whatever its severity: %s / %q", raw, parts[0].Text)
 	}
 }
 
@@ -362,3 +367,40 @@ type fakeRenderer struct{ text string }
 
 func (f fakeRenderer) Render(string, notification.Notification) (string, error) { return f.text, nil }
 func (f fakeRenderer) Has(string) bool                                          { return true }
+
+func TestSink_ReplyGoesToThread(t *testing.T) {
+	f := newFakeSlack(t, nil)
+	s := NewSink(f.client(1), nil, true, nil)
+	ctx := context.Background()
+	p := sink.Part{Text: "resolved", Payload: mustPayload(t)}
+
+	if _, err := s.Send(ctx, sink.Target{Sink: sink.Slack, Chat: "C1", ReplyTo: "111.1"}, p, nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.last["thread_ts"] != "111.1" || f.last["reply_broadcast"] != nil {
+		t.Errorf("reply must go into the firing message's thread: %v", f.last)
+	}
+
+	// Already in a thread: stay there.
+	s.SetReplyBroadcast(true)
+	if _, err := s.Send(ctx, sink.Target{Sink: sink.Slack, Chat: "C1", Thread: "100.0", ReplyTo: "111.1"}, p, nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.last["thread_ts"] != "100.0" || f.last["reply_broadcast"] != true {
+		t.Errorf("thread target keeps its thread, broadcast on: %v", f.last)
+	}
+
+	if _, err := s.Send(ctx, sink.Target{Sink: sink.Slack, Chat: "C1"}, p, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.last["reply_broadcast"]; ok {
+		t.Error("broadcast only applies to replies")
+	}
+
+	if err := s.Edit(ctx, sink.MessageRef{Sink: sink.Slack, Chat: "C1", ID: "111.1"}, p, nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.last["ts"] != "111.1" {
+		t.Errorf("edit is chat.update of the message: %v", f.last)
+	}
+}
