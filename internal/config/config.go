@@ -26,6 +26,7 @@ type Config struct {
 	Dedup        Dedup             `yaml:"dedup"`
 	Slack        Slack             `yaml:"slack"`
 	Format       Format            `yaml:"format"`
+	Resolve      Resolve           `yaml:"resolve"`
 	// Clusters name alert sources with their own Alertmanager, webhook token
 	// and destinations. Empty = one implicit `default` cluster (legacy mode).
 	Clusters map[string]Cluster `yaml:"clusters"`
@@ -156,6 +157,33 @@ type Dedup struct {
 	TTL     time.Duration `yaml:"ttl"`
 }
 
+// Resolve modes: how a resolved Alertmanager alert reaches a chat that got
+// its firing message.
+const (
+	// ResolveNew posts the resolve as its own message (0.8 behaviour).
+	ResolveNew = "new"
+	// ResolveReply posts it as a reply to the firing message (Telegram
+	// reply, Slack thread) and rewrites the firing message as resolved.
+	ResolveReply = "reply"
+	// ResolveEdit only rewrites the firing message: half the messages, but
+	// the resolve itself triggers no notification.
+	ResolveEdit = "edit"
+)
+
+// Resolve links resolved alerts to their firing messages. The link lives in
+// memory: after a restart, an eviction or past TTL a resolve falls back to
+// a new message.
+type Resolve struct {
+	Mode string `yaml:"mode"`
+	// TTL is how long a firing message stays linkable; alerts can fire for
+	// days, so it is long.
+	TTL        time.Duration `yaml:"ttl"`
+	MaxEntries int           `yaml:"max_entries"`
+	// SlackBroadcast also posts the threaded resolve reply to the channel
+	// ("Also send to channel").
+	SlackBroadcast bool `yaml:"slack_broadcast"`
+}
+
 func Default() Config {
 	return Config{
 		Server: Server{
@@ -232,6 +260,11 @@ func Default() Config {
 				InitialBackoff: time.Second,
 				MaxBackoff:     60 * time.Second,
 			},
+		},
+		Resolve: Resolve{
+			Mode:       ResolveNew,
+			TTL:        7 * 24 * time.Hour,
+			MaxEntries: 10000,
 		},
 		Format: Format{
 			Telegram: FormatTemplate,
@@ -363,6 +396,18 @@ func (c Config) Validate() error {
 	}
 	if c.Updates.Commands.Enabled && c.Updates.Commands.Status.Pipeline && c.Updates.Commands.Status.PipelineTimeout <= 0 {
 		return errors.New("updates.commands.status.pipeline_timeout must be > 0 when the pipeline section is enabled")
+	}
+	switch c.Resolve.Mode {
+	case ResolveNew:
+	case ResolveReply, ResolveEdit:
+		if c.Resolve.TTL <= 0 {
+			return errors.New("resolve.ttl must be > 0")
+		}
+		if c.Resolve.MaxEntries <= 0 {
+			return errors.New("resolve.max_entries must be > 0")
+		}
+	default:
+		return fmt.Errorf("resolve.mode must be one of new, reply, edit (got %q)", c.Resolve.Mode)
 	}
 	if c.Dedup.Enabled && c.Dedup.TTL <= 0 {
 		return errors.New("dedup.ttl must be > 0 when dedup.enabled is true")

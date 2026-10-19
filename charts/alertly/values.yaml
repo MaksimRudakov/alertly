@@ -372,6 +372,18 @@ config:
     enabled: true
     ttl: 1h
 
+  # -- How a resolved Alertmanager alert reaches a chat that got its firing
+  # message: `new` (separate message, default), `reply` (Telegram reply /
+  # Slack thread, and the firing message is rewritten as resolved without
+  # buttons) or `edit` (only the rewrite — half the messages, but no
+  # notification). Links are in memory (~1 KiB each; Slack keeps the sent
+  # blocks): after a restart a resolve is a new message.
+  resolve:
+    mode: new
+    ttl: 168h
+    max_entries: 10000
+    slack_broadcast: false
+
 # -- Raw manifests rendered as-is. Use for resources the chart does not template
 # natively (e.g. NetworkPolicy). For Prometheus scraping and disruption budgets
 # prefer the native `metrics.serviceMonitor` and `podDisruptionBudget` blocks above.

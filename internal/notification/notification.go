@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -19,6 +20,9 @@ type Notification struct {
 	Annotations map[string]string
 	Links       []Link
 	Timestamp   time.Time
+	// StartsAt is when the alert started firing (Alertmanager); it tells
+	// incidents of the same fingerprint apart. Zero for other sources.
+	StartsAt time.Time
 }
 
 type Link struct {
@@ -35,6 +39,9 @@ func (n Notification) StatusLine() []string {
 		status = "Firing"
 	case "resolved":
 		status = "Resolved"
+		if d := n.Duration(); d > 0 {
+			status += " after " + humanize(d)
+		}
 	case "":
 		status = "Event"
 	default:
@@ -48,4 +55,34 @@ func (n Notification) StatusLine() []string {
 		parts = append(parts, n.Severity)
 	}
 	return parts
+}
+
+// Duration is how long a resolved alert fired; 0 when unknown.
+func (n Notification) Duration() time.Duration {
+	if n.Status != "resolved" || n.StartsAt.IsZero() || n.Timestamp.Before(n.StartsAt) {
+		return 0
+	}
+	return n.Timestamp.Sub(n.StartsAt)
+}
+
+// humanize prints a coarse duration: 45s, 12m, 3h5m, 2d4h.
+func humanize(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		h, m := int(d.Hours()), int(d.Minutes())%60
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh%dm", h, m)
+	default:
+		days, h := int(d.Hours())/24, int(d.Hours())%24
+		if h == 0 {
+			return fmt.Sprintf("%dd", days)
+		}
+		return fmt.Sprintf("%dd%dh", days, h)
+	}
 }

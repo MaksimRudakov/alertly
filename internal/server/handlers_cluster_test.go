@@ -31,9 +31,12 @@ type recordingSink struct {
 	delay time.Duration
 	fail  error
 
+	editFail error
+
 	mu      sync.Mutex
 	sent    []sinkSend
 	updates []sinkUpdate
+	edits   []sinkUpdate
 	nextID  int
 }
 
@@ -76,6 +79,22 @@ func (s *recordingSink) SetActions(_ context.Context, ref sink.MessageRef, origi
 	return nil
 }
 
+func (s *recordingSink) Edit(_ context.Context, ref sink.MessageRef, p sink.Part, a *sink.Actions) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.editFail != nil {
+		return s.editFail
+	}
+	s.edits = append(s.edits, sinkUpdate{Ref: ref, Original: p, Actions: a})
+	return nil
+}
+
+func (s *recordingSink) Edits() []sinkUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]sinkUpdate(nil), s.edits...)
+}
+
 func (s *recordingSink) Updates() []sinkUpdate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,7 +131,7 @@ type clusterEnv struct {
 	clusters map[string]*Cluster
 }
 
-func newClusterEnv(t *testing.T, cache *dedup.Cache) *clusterEnv {
+func newClusterEnv(t *testing.T, cache *dedup.Cache, opts ...func(*Deps)) *clusterEnv {
 	t.Helper()
 	metrics.Init()
 	e := &clusterEnv{
@@ -132,7 +151,7 @@ func newClusterEnv(t *testing.T, cache *dedup.Cache) *clusterEnv {
 			"default": {{Sink: sink.Telegram, Chat: "-100"}, {Sink: sink.Slack, Chat: "C0DATA0001"}},
 		}},
 	}
-	s := New(config.Default().Server, Deps{
+	deps := Deps{
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Sources:               map[string]source.Source{"alertmanager": source.NewAlertmanager(), "generic": source.NewGeneric()},
 		Sinks:                 map[string]sink.Sink{sink.Telegram: e.tg, sink.Slack: e.slack},
@@ -143,7 +162,11 @@ func newClusterEnv(t *testing.T, cache *dedup.Cache) *clusterEnv {
 		Registry:              prometheus.NewRegistry(),
 		SlackChannelAllowlist: []string{"C0DATA0001"},
 		Dedup:                 cache,
-	})
+	}
+	for _, o := range opts {
+		o(&deps)
+	}
+	s := New(config.Default().Server, deps)
 	e.ts = httptest.NewServer(s.srv.Handler)
 	t.Cleanup(e.ts.Close)
 	return e

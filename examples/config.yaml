@@ -110,3 +110,13 @@ alertmanager:
 dedup:
   enabled: true
   ttl: 1h
+
+# How a resolved Alertmanager alert reaches a chat that got its firing
+# message: new (separate message), reply (reply / Slack thread + firing
+# message rewritten as resolved) or edit (only the rewrite; no notification).
+# Links live in memory: after a restart the resolve is a new message.
+resolve:
+  mode: new
+  ttl: 168h
+  max_entries: 10000
+  slack_broadcast: false

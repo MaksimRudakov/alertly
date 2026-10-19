@@ -149,6 +149,18 @@ func run() error {
 		}
 	}
 
+	var messages *server.MessageLog
+	if cfg.Resolve.Mode != config.ResolveNew {
+		messages = server.NewMessageLog(cfg.Resolve.TTL, cfg.Resolve.MaxEntries)
+		metrics.RegisterSizeGauge("alertly_resolve_links_entries",
+			"Current number of firing alerts linked to their messages (resolve.mode reply/edit).", messages.Len)
+		status.Sizes = append(status.Sizes, server.SizeStat{Label: "Resolve links", Len: messages.Len})
+		if ss, ok := sinks[sink.Slack].(*slack.Sink); ok {
+			ss.SetReplyBroadcast(cfg.Resolve.SlackBroadcast)
+		}
+		logger.Info("resolve linking enabled", "mode", cfg.Resolve.Mode, "ttl", cfg.Resolve.TTL, "max_entries", cfg.Resolve.MaxEntries)
+	}
+
 	srv := server.New(cfg.Server, server.Deps{
 		Logger:                logger,
 		Sources:               sources,
@@ -165,6 +177,8 @@ func run() error {
 		Tracker:               trackerReg,
 		Dedup:                 dedupCache,
 		Activity:              activity,
+		ResolveMode:           cfg.Resolve.Mode,
+		Messages:              messages,
 	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -422,7 +436,7 @@ func setupUpdates(cfg config.Config, tgClient telegram.Client, sinks map[string]
 		"commands_enabled", cfg.Updates.Commands.Enabled,
 		"clusters_with_alertmanager", withAM,
 	)
-	return keyboard, tracker, workers, nil
+	return keyboard, server.ButtonSet{Silence: tracker, Undo: undoTracker}, workers, nil
 }
 
 func int64sToStrings(in []int64) []string {

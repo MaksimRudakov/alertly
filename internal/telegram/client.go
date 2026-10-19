@@ -31,6 +31,8 @@ type Client interface {
 
 type SendOptions struct {
 	ReplyMarkup *InlineKeyboardMarkup
+	// ReplyTo makes the message a reply; sent even if that message is gone.
+	ReplyTo int64
 }
 
 type Config struct {
@@ -90,6 +92,12 @@ type sendMessagePayload struct {
 	DisableWebPagePreview bool                  `json:"disable_web_page_preview"`
 	MessageThreadID       *int                  `json:"message_thread_id,omitempty"`
 	ReplyMarkup           *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	ReplyParameters       *replyParameters      `json:"reply_parameters,omitempty"`
+}
+
+type replyParameters struct {
+	MessageID                int64 `json:"message_id"`
+	AllowSendingWithoutReply bool  `json:"allow_sending_without_reply"`
 }
 
 type apiResponse struct {
@@ -123,6 +131,9 @@ func (c *client) SendMessage(ctx context.Context, chatID int64, threadID *int, t
 	}
 	if opts != nil {
 		payload.ReplyMarkup = opts.ReplyMarkup
+		if opts.ReplyTo != 0 {
+			payload.ReplyParameters = &replyParameters{MessageID: opts.ReplyTo, AllowSendingWithoutReply: true}
+		}
 	}
 
 	endpoint := c.endpoint("sendMessage")
