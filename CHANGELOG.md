@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-19
+
 Slack as a second messenger — delivery, silence buttons and `/alertly status` — and multi-cluster routing. Backward compatible for existing configs: without `slack`, `clusters` and `updates.slack` blocks alertly behaves as 0.7.x (same routes, message format, silence button data). One breaking detail for dashboards: see *Changed → metrics*.
 
 ### Added
@@ -28,6 +30,8 @@ Slack as a second messenger — delivery, silence buttons and `/alertly status` 
 - `TELEGRAM_BOT_TOKEN` is required only while `telegram.enabled` (new, default `true`); `WEBHOOK_AUTH_TOKEN` only when no `clusters` are defined. `updates.enabled` needs an interactive messenger (Telegram or `updates.slack`) and an Alertmanager on at least one cluster.
 - The Telegram long-poll loop runs only when `updates.chat_allowlist` is non-empty — with an empty list every button and command was refused anyway, and the idle poller still occupied the bot token (a Slack-only interactive setup would otherwise collide with another instance polling the same bot).
 - The button tracker is keyed by messenger and keeps the message as sent (Slack's `chat.update` resends the whole body); the Helm guard against `replicaCount > 1` with `updates.enabled` now also covers Slack Socket Mode.
+- **Go 1.26.9** (was 1.26.7 in the 0.7.4 image): fixes three HIGH denial-of-service CVEs in the standard library — CVE-2026-78667 (`net/http`), CVE-2026-78669 (`net/http` HTTP/2), CVE-2026-97031 (`crypto/tls`).
+- Dependencies: `prometheus/client_golang` 1.24.1 → 1.25.0 (breaking changes only in `api/prometheus/v1`, unused here); GitHub Actions bumped: codeql-action 4.39.0, goreleaser-action 7.3.0, scorecard-action 2.5.0, helm/kind 1.15.1, upload-artifact 7.0.2.
 
 ### Fixed
 - **An alert storm no longer takes the pod out of the Service.** When a webhook carries more messages than fit in the request budget, the rate limiter refuses to wait past the deadline with its own error (`rate: Wait would exceed context deadline`), which was classified as a server failure: ten in a row flipped readiness to unready (since 0.5 for Telegram) until the next successful probe, so Alertmanager's retries met a pod without endpoints. Such refusals are now treated as the request's own budget running out: readiness is untouched, the sink stops for this request, the response is `207` and the remaining notifications are delivered by the caller's retry (deduped). Refused sends no longer count as attempts or errors. The readiness reason no longer names Telegram for every sink.
@@ -228,7 +232,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/MaksimRudakov/alertly/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/MaksimRudakov/alertly/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/MaksimRudakov/alertly/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/MaksimRudakov/alertly/compare/v0.7.1...v0.7.2
