@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### Changed
 - GitHub Actions bumped: codeql-action 4.39.1, docker/login-action 4.7.0, helm/chart-releaser-action 1.8.0 (bundles `cr` 1.9.0 instead of 1.6.1).
 
+### Fixed
+- Slack Socket Mode shutdown no longer waits up to 5 s for a close handshake: when the stop signal arrived between two reads, the WebSocket library returned without closing the connection and the graceful close waited for a peer reply (indefinitely silent on a dead network). The socket is now closed immediately on shutdown.
+
 ## [0.9.0] - 2026-10-19
 
 Resolve linking: the resolve of an Alertmanager alert can answer or rewrite its firing message. Off by default (`resolve.mode: new`) — without a `resolve` block alertly behaves as 0.8.0.
