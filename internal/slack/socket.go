@@ -189,7 +189,11 @@ func (s *Socket) serve(ctx context.Context, wsURL string, queue chan<- Envelope,
 		_, data, err := conn.Read(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				_ = conn.Close(websocket.StatusNormalClosure, "shutdown")
+				// No close handshake on shutdown: when ctx is already done as
+				// Read is entered, the library returns without closing the
+				// conn, and Close would then wait up to 5s for the peer's
+				// close frame (forever-silent on a dead network).
+				_ = conn.CloseNow()
 				return "shutdown"
 			}
 			select {
