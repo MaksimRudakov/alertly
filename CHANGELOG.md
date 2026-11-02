@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-02
+
+Security patch: Go 1.26.10 and a faster Slack Socket Mode shutdown. No configuration changes.
+
 ### Security
 - **Go 1.26.10** (was 1.26.9 in the 0.9.0 image): fixes HIGH CVE-2026-111943 in `crypto/x509` (man-in-the-middle); `golang:1.26-alpine` base image digest refreshed.
 
@@ -252,7 +256,8 @@ Runtime behaviour unchanged vs `v0.0.2`. This release bumps the image tag to kee
 - Helm chart `charts/alertly` (version 0.0.1, appVersion 0.0.1): Deployment/Service/ConfigMap/Secret/ServiceAccount/Ingress (opt-in) + `extraManifests` escape hatch for PodMonitor/PDB/NetworkPolicy. Published to GitHub Pages (`helm repo add`) and OCI (`oci://ghcr.io/maksimrudakov/charts`). Both tarball and OCI manifest cosign-signed.
 - New alertmanager template: `Alert Name`, `Severity`, `Runbook URL` formatting; `generatorURL` is no longer emitted.
 
-[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/MaksimRudakov/alertly/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/MaksimRudakov/alertly/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/MaksimRudakov/alertly/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/MaksimRudakov/alertly/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/MaksimRudakov/alertly/compare/v0.7.3...v0.7.4
