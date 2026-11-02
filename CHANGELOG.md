@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Security
+- **Go 1.26.10** (was 1.26.9 in the 0.9.0 image): fixes HIGH CVE-2026-111943 in `crypto/x509` (man-in-the-middle); `golang:1.26-alpine` base image digest refreshed.
+
+### Changed
+- GitHub Actions bumped: codeql-action 4.39.1, docker/login-action 4.7.0, helm/chart-releaser-action 1.8.0 (bundles `cr` 1.9.0 instead of 1.6.1).
+
 ## [0.9.0] - 2026-10-19
 
 Resolve linking: the resolve of an Alertmanager alert can answer or rewrite its firing message. Off by default (`resolve.mode: new`) — without a `resolve` block alertly behaves as 0.8.0.
